@@ -1,0 +1,7 @@
+{
+  "note": "Test accounts for development and automated tests on a local server. Never use them on the real server.",
+  "users": [
+    { "name": "Alex", "password": "test-alex-4417" },
+    { "name": "Sam", "password": "test-sam-9026" }
+  ]
+}
