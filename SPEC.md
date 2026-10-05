@@ -152,6 +152,7 @@ All bodies are JSON. A request with a body must have `Content-Type: application/
 | `POST /api/push/subscribe` | `{ endpoint, keys: { p256dh, auth } }` for this session |
 | `POST /api/push/unsubscribe` | `{ endpoint }` |
 | `POST /api/push/test` | Sends a test notification to the devices of the person |
+| `POST /api/test/reset` | Only when the environment variable `ST_TEST_RESET` is `1`: deletes all data and writes the seed data again. For automated tests. In each other case the route does not exist |
 
 Errors are `{ error: { code, message } }` with a 4xx or 5xx status. Codes: `unauthorized`, `forbidden`, `invalid`, `conflict`, `rate_limited`, `closed`, `not_found`, `server`.
 
