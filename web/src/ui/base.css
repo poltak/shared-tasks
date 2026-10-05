@@ -1,0 +1,263 @@
+/* Reset and the rules that all screens share. Colors and sizes come from tokens.css. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  background: var(--bg);
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  /* No pull-to-refresh and no bounce of the page: the installed app must feel like an app. */
+  overscroll-behavior: none;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 400 14px/1.4 var(--font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure,
+fieldset {
+  margin: 0;
+}
+
+fieldset {
+  border: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+legend {
+  padding: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+button,
+input,
+textarea,
+select {
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+}
+
+button {
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+button:disabled,
+[aria-disabled='true'] {
+  cursor: default;
+}
+
+/* A press on a control must not select its text. */
+button,
+label,
+summary,
+[role='button'],
+[role='tab'],
+[role='menuitem'],
+[role='menuitemradio'],
+[role='option'] {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* iOS zooms the page when a field with a font below 16 px gets the focus. */
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
+/* Text fields start with no look of their own. Check boxes and the like keep the look of the browser. */
+input:not([type='checkbox'], [type='radio'], [type='range'], [type='file'], [type='color']),
+textarea {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background: none;
+  appearance: none;
+}
+
+textarea {
+  resize: none;
+}
+
+::placeholder {
+  color: var(--text-dim);
+  opacity: 1;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--primary) 26%, transparent);
+}
+
+a {
+  color: var(--primary);
+}
+
+svg {
+  display: block;
+  flex: none;
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* A text field shows the focus on its box, which the field component draws. */
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/* State layer: a veil in the text color of the control, for hover, focus, and press.
+   Only its opacity changes. Put the class on a control that has `position: relative` free. */
+.ui-state {
+  position: relative;
+}
+.ui-state::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: currentColor;
+  opacity: 0;
+  transition: opacity var(--dur-fast) linear;
+  pointer-events: none;
+}
+@media (hover: hover) {
+  .ui-state:hover::after {
+    opacity: 0.07;
+  }
+}
+.ui-state:focus-visible::after {
+  opacity: 0.1;
+}
+.ui-state:active::after {
+  opacity: 0.13;
+}
+.ui-state:disabled::after,
+.ui-state[aria-disabled='true']::after {
+  opacity: 0;
+}
+
+/* ---- Overlays (overlay.svelte.ts) ---- */
+
+/* All menus, dialogs, and sheets are children of this element, in the order in which they opened. */
+.ui-overlays {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  z-index: var(--z-overlay);
+}
+
+/* One overlay. Its box is the part of the window that the on-screen keyboard does not cover:
+   overlay.svelte.ts keeps --vvt and --vvh equal to the visual viewport. */
+.ui-layer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: var(--vvt, 0px);
+  height: var(--vvh, 100%);
+  pointer-events: none;
+}
+.ui-layer > * {
+  pointer-events: auto;
+}
+
+.ui-scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  touch-action: none;
+}
+
+html.ui-scroll-lock {
+  overflow: hidden;
+}
+/* The scroll bar of the page goes away with the lock. The padding keeps the page in its place. */
+html.ui-scroll-lock body {
+  padding-right: var(--ui-scroll-gap, 0px);
+}
+
+/* ---- Tooltip (tooltip.ts) ---- */
+
+.ui-tooltip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: var(--z-tooltip);
+  max-width: 240px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--inverse-surface);
+  color: var(--inverse-text);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-fast) linear;
+}
+.ui-tooltip.show {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  .ui-overlays,
+  .ui-tooltip {
+    display: none !important;
+  }
+}

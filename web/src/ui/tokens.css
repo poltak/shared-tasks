@@ -1,0 +1,136 @@
+/* Design tokens. The light theme is the base. The dark theme applies when the system is dark and
+   <html> has no data-theme, or when data-theme is "dark". */
+
+:root {
+  color-scheme: light;
+
+  --bg: #f6f8fc;
+  --surface: #ffffff;
+  --surface-2: #eef1f8;
+  --surface-3: #e3e8f2;
+  /* Menus, dialogs, and sheets. In the dark theme they are lighter than a card and their shadows
+     start with a thin light line, because a shadow does not show on a dark page. */
+  --popup: #ffffff;
+  /* The box of a text field and of the controls that look like one, and the chosen part in such a box. */
+  --field: #eef1f8;
+  --field-on: #ffffff;
+  --text: #1b1c20;
+  --text-dim: #5c606b;
+  --text-off: #9a9eaa;
+  --outline: #c9cdd8;
+  --divider: #e4e7ef;
+  --primary: #3b5bdb;
+  --on-primary: #ffffff;
+  --primary-container: #dde4ff;
+  --on-primary-container: #1c2f7a;
+  --danger: #c5221f;
+  --on-danger: #ffffff;
+  --danger-container: #fce4e2;
+  --star: var(--primary);
+  --inverse-surface: #2e3138;
+  --inverse-text: #f1f2f6;
+  --inverse-primary: #b4c5ff;
+  --scrim: rgb(18 22 34 / 0.42);
+
+  --shadow-1: 0 1px 2px rgb(24 32 56 / 0.08), 0 1px 3px rgb(24 32 56 / 0.06);
+  --shadow-2: 0 2px 6px rgb(24 32 56 / 0.1), 0 8px 20px rgb(24 32 56 / 0.1);
+  --shadow-3: 0 6px 16px rgb(24 32 56 / 0.12), 0 20px 48px rgb(24 32 56 / 0.18);
+
+  --radius-card: 16px;
+  --radius-popup: 20px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --dur-fast: 120ms;
+  --dur: 180ms;
+  --dur-slow: 220ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in: cubic-bezier(0.3, 0, 1, 1);
+
+  --z-sticky: 10;
+  --z-fab: 20;
+  --z-overlay: 1000;
+  --z-snackbar: 2000;
+  --z-tooltip: 3000;
+
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  /* The drag and drop engine (web/src/dnd/dnd.css) reads these. */
+  --dnd-accent: var(--primary);
+  --dnd-lift-bg: var(--popup);
+  --dnd-lift-radius: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+
+    --bg: #111318;
+    --surface: #1a1c22;
+    --surface-2: #23262e;
+    --surface-3: #2d313b;
+    --popup: #262931;
+    --field: #31353f;
+    --field-on: #4a4f5c;
+    --text: #e4e6eb;
+    --text-dim: #a0a5b1;
+    --text-off: #6c717d;
+    --outline: #434854;
+    --divider: #2f333d;
+    --primary: #a9bcff;
+    --on-primary: #10214f;
+    --primary-container: #2b3f7d;
+    --on-primary-container: #dde4ff;
+    --danger: #ffb4ab;
+    --on-danger: #5f1410;
+    --danger-container: #5c1d1a;
+    --inverse-surface: #e4e6eb;
+    --inverse-text: #1b1c20;
+    --inverse-primary: #3b5bdb;
+    --scrim: rgb(0 0 0 / 0.56);
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+    --shadow-2: 0 0 0 1px rgb(255 255 255 / 0.07), 0 2px 6px rgb(0 0 0 / 0.4), 0 8px 20px rgb(0 0 0 / 0.36);
+    --shadow-3: 0 0 0 1px rgb(255 255 255 / 0.07), 0 6px 16px rgb(0 0 0 / 0.44), 0 20px 48px rgb(0 0 0 / 0.5);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #111318;
+  --surface: #1a1c22;
+  --surface-2: #23262e;
+  --surface-3: #2d313b;
+  --popup: #262931;
+  --field: #31353f;
+  --field-on: #4a4f5c;
+  --text: #e4e6eb;
+  --text-dim: #a0a5b1;
+  --text-off: #6c717d;
+  --outline: #434854;
+  --divider: #2f333d;
+  --primary: #a9bcff;
+  --on-primary: #10214f;
+  --primary-container: #2b3f7d;
+  --on-primary-container: #dde4ff;
+  --danger: #ffb4ab;
+  --on-danger: #5f1410;
+  --danger-container: #5c1d1a;
+  --inverse-surface: #e4e6eb;
+  --inverse-text: #1b1c20;
+  --inverse-primary: #3b5bdb;
+  --scrim: rgb(0 0 0 / 0.56);
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-2: 0 0 0 1px rgb(255 255 255 / 0.07), 0 2px 6px rgb(0 0 0 / 0.4), 0 8px 20px rgb(0 0 0 / 0.36);
+  --shadow-3: 0 0 0 1px rgb(255 255 255 / 0.07), 0 6px 16px rgb(0 0 0 / 0.44), 0 20px 48px rgb(0 0 0 / 0.5);
+}
