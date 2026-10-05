@@ -1,0 +1,7 @@
+<!-- For the status bar of Android, which uses only the alpha values of the image. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="56 52 400 400">
+  <g fill="none" stroke="#fff" stroke-width="50" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M270 302l18 18L424 184" opacity=".6"/>
+    <path d="M88 248l72 72L296 184"/>
+  </g>
+</svg>
