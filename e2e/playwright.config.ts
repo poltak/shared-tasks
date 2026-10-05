@@ -29,7 +29,12 @@ export default defineConfig({
     env: { E2E_PORT: String(port) },
   },
   projects: [
-    { name: 'desktop', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } },
-    { name: 'phone', use: { ...devices['Pixel 7'] } },
+    // A file named *.desktop.spec.ts or *.phone.spec.ts runs in that project only.
+    {
+      name: 'desktop',
+      testIgnore: '**/*.phone.spec.ts',
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 }, locale: 'en-GB' },
+    },
+    { name: 'phone', testIgnore: '**/*.desktop.spec.ts', use: { ...devices['Pixel 7'], locale: 'en-GB' } },
   ],
 });

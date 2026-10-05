@@ -19,7 +19,8 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   webServer: {
-    command: `pnpm exec vite --config web/vite.config.ts --port ${port} --strictPort --host 127.0.0.1`,
+    // Vite is started with node directly. Through pnpm, the Vite process stays alive after the tests.
+    command: `node node_modules/vite/bin/vite.js --config web/vite.config.ts --port ${port} --strictPort --host 127.0.0.1`,
     cwd: root,
     url: `http://127.0.0.1:${port}/`,
     reuseExistingServer: true,

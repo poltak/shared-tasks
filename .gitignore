@@ -2,7 +2,7 @@ node_modules/
 web/dist/
 
 # Databases and temporary data of development servers and tests
-data/
+/data/
 .tmp/
 
 # Playwright output

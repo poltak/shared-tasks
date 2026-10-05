@@ -6,10 +6,11 @@ import path from 'node:path';
 const root = path.resolve(import.meta.dirname, '..');
 const port = process.env.E2E_PORT ?? '5120';
 const dataDir = path.join(root, '.tmp', `e2e-${port}`);
-const webDir = path.join(root, 'web', 'dist');
+// E2E_WEB_DIR lets two test runs use two builds at the same time.
+const webDir = path.resolve(root, process.env.E2E_WEB_DIR ?? path.join('web', 'dist'));
 
 if (!existsSync(path.join(webDir, 'index.html'))) {
-  console.error('web/dist is missing. Run "pnpm build" first.');
+  console.error(`${webDir} is missing. Run "pnpm build" first.`);
   process.exit(1);
 }
 
@@ -24,6 +25,8 @@ const env = {
   WEB_DIR: webDir,
   // Lets a test put the database back to the seed data. Never set this on the real server.
   ST_TEST_RESET: '1',
+  // The seed makes two accounts. One more place lets a test make an account.
+  MAX_USERS: '3',
 };
 
 const seed = spawnSync(process.execPath, ['server/cli.ts', 'seed'], { cwd: root, env, stdio: 'inherit' });
