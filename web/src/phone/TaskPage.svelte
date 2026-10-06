@@ -211,11 +211,11 @@
     {:else}
       <div class="empty" data-flip-block>
         {#if starred}
-          <EmptyState title="No starred tasks" text="Mark important tasks with a star so that you can find them here" />
+          <EmptyState title="No starred tasks" text="Star a task to find it here" />
         {:else if doneCount > 0}
-          <EmptyState kind="done" title="All tasks complete" text="Nice work!" />
+          <EmptyState kind="done" title="All done" text="Every task in this list is complete" />
         {:else}
-          <EmptyState title="No tasks yet" text="Add your to-dos and keep track of them here" />
+          <EmptyState title="Nothing here yet" text="Add a task to get started" />
         {/if}
       </div>
     {/if}

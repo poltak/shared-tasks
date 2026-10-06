@@ -495,17 +495,17 @@ test.describe('complete', () => {
     await expect(doneList(page, 'Home')).toHaveCount(0);
   });
 
-  test('a list with no open task shows "All tasks complete", and a new list shows "No tasks yet"', async ({ page }) => {
+  test('a list with no open task shows "All done", and a new list shows "Nothing here yet"', async ({ page }) => {
     await row(page, 'Home', 'Water the plants').getByRole('checkbox').click();
-    await expect(column(page, 'Home')).toContainText('All tasks complete');
-    await expect(column(page, 'Home')).toContainText('Nice work!');
+    await expect(column(page, 'Home')).toContainText('All done');
+    await expect(column(page, 'Home')).toContainText('Every task in this list is complete');
 
     await sidebar(page).getByRole('button', { name: 'Create new list' }).click();
     const prompt = page.getByRole('dialog', { name: 'Create new list' });
     await prompt.getByRole('textbox').fill('Work');
     await prompt.getByRole('button', { name: 'Done' }).click();
-    await expect(column(page, 'Work')).toContainText('No tasks yet');
-    await expect(column(page, 'Work')).toContainText('Add your to-dos and keep track of them here');
+    await expect(column(page, 'Work')).toContainText('Nothing here yet');
+    await expect(column(page, 'Work')).toContainText('Add a task to get started');
   });
 });
 
@@ -849,7 +849,7 @@ test.describe('star', () => {
     await expect(rows.locator('.title')).toHaveText(['Eggs']);
     await rows.nth(0).getByRole('checkbox').click();
     await expect(starred).toContainText('No starred tasks');
-    await expect(starred).toContainText('Mark important tasks with a star so you can find them here');
+    await expect(starred).toContainText('Star a task to find it here');
 
     await sidebar(page).getByRole('button', { name: 'All tasks' }).click();
     await expect(column(page, 'My Tasks')).toBeVisible();

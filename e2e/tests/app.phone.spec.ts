@@ -484,7 +484,7 @@ test.describe('complete', () => {
     await expect(circle(present)).toHaveAttribute('aria-checked', 'false');
   });
 
-  test('a parent completes its subtasks, and the last task gives "All tasks complete"', async ({ page }) => {
+  test('a parent completes its subtasks, and the last task gives "All done"', async ({ page }) => {
     const list = panel(page, 'My Tasks');
     await circle(row(list, 'Pack for the trip')).click();
     await expect(snackbar(page)).toContainText('3 tasks completed');
@@ -495,8 +495,8 @@ test.describe('complete', () => {
       await circle(row(groceries, title)).click();
       await expect(row(groceries, title)).toHaveCount(0);
     }
-    await expect(groceries.getByText('All tasks complete')).toBeVisible();
-    await expect(groceries.getByText('Nice work!')).toBeVisible();
+    await expect(groceries.getByText('All done')).toBeVisible();
+    await expect(groceries.getByText('Every task in this list is complete')).toBeVisible();
     await expect(groceries.getByRole('button', { name: 'Completed (5)' })).toBeVisible();
   });
 
@@ -532,8 +532,8 @@ test.describe('complete', () => {
     await expect(row(home, 'Water the plants')).toContainText('Today');
     await circle(row(home, 'Water the plants')).click();
     await expect(snackbar(page)).toContainText('Task completed. It comes back on');
-    await expect(home.getByText('No tasks yet')).toHaveCount(0);
-    await expect(home.getByText('All tasks complete')).toBeVisible();
+    await expect(home.getByText('Nothing here yet')).toHaveCount(0);
+    await expect(home.getByText('All done')).toBeVisible();
 
     await home.getByRole('button', { name: 'Completed (4)' }).click();
     const resting = completedRows(home).filter({ hasText: 'Water the plants' });
@@ -687,8 +687,8 @@ test.describe('lists', () => {
     await expect(tab(page, 'Garden')).toHaveAttribute('aria-selected', 'true');
     const garden = panel(page, 'Garden');
     await expect(garden.getByRole('heading', { name: 'Garden' })).toBeInViewport({ ratio: 1 });
-    await expect(garden.getByText('No tasks yet')).toBeVisible();
-    await expect(garden.getByText('Add your to-dos and keep track of them here')).toBeVisible();
+    await expect(garden.getByText('Nothing here yet')).toBeVisible();
+    await expect(garden.getByText('Add a task to get started')).toBeVisible();
 
     await addTask(page, 'Cut the grass');
     await closeAddSheet(page);

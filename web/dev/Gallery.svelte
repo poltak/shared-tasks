@@ -384,8 +384,8 @@
   <section class="card" data-testid="section-empty">
     <h2>Empty states</h2>
     <div class="empties">
-      <div class="inner"><EmptyState kind="empty" title="No tasks yet" text="Add your to-dos and keep track of them here" /></div>
-      <div class="inner"><EmptyState kind="done" title="All tasks complete" text="Nice work!" /></div>
+      <div class="inner"><EmptyState kind="empty" title="Nothing here yet" text="Add a task to get started" /></div>
+      <div class="inner"><EmptyState kind="done" title="All done" text="Every task in this list is complete" /></div>
     </div>
   </section>
 

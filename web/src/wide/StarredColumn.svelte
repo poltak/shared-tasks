@@ -46,7 +46,7 @@
         <Groups {groups} column={STARRED} byDate={prefs.starredSort === 'date'} showList draggable={false} />
       </div>
       {#if groups.length === 0}
-        <EmptyState kind="empty" title="No starred tasks" text="Mark important tasks with a star so you can find them here" />
+        <EmptyState kind="empty" title="No starred tasks" text="Star a task to find it here" />
       {/if}
       <div data-flow-end></div>
     </div>

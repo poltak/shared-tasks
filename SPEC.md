@@ -1,6 +1,6 @@
 # Shared Tasks: specification
 
-Shared Tasks is a todo list web app for two people. It works like Google Tasks without the Calendar integration. Each device keeps a full copy of the data and works offline. A small server on an old phone keeps the devices in sync.
+Shared Tasks is a todo list web app for two people. Its feature set follows Google Tasks, without the Calendar integration. Each device keeps a full copy of the data and works offline. A small server on an old phone keeps the devices in sync.
 
 This file is the contract for the code.
 
@@ -9,7 +9,7 @@ This file is the contract for the code.
 1. **Fast.** Each user action changes the screen in the same frame. The app never waits for the network before it shows a result. No spinners for local data.
 2. **Offline first.** The device is the source of what the user sees. The server is a relay and a backup.
 3. **Small.** The server has no npm packages. The client ships one library, Svelte. Do not add a dependency.
-4. **Familiar.** A person who knows Google Tasks can use the app with no instructions.
+4. **Familiar.** A person who knows a common todo app can use this one with no instructions.
 
 Performance budget:
 
@@ -359,7 +359,7 @@ One card: name, password, a "Sign in" button. If sign-up is open, a second mode 
 - **Top bar**: the title "Tasks", a small sync icon that shows only when the device is offline or has pending changes, and a round button with the first letter of the person's name. The button opens Settings.
 - **Tabs**: a row that scrolls sideways. First a star tab, then one tab for each list, then "+ New list". A tab shows the open count in a pill, but not on the active tab and not for 0. A shared list has a small people icon.
 - **Pages**: one page for each tab, in a sideways scroll area with scroll snap. A swipe changes the tab. A tap on a tab scrolls to the page. Only the active page and its two neighbors have content.
-- **Page of a list**: a card with a header row (list name, a sort button, a three-dot button), then the task groups. A second card "Completed (N)" that opens and closes. The empty states have a small drawing and the texts "No tasks yet" with "Add your to-dos and keep track of them here", and "All tasks complete" with "Nice work!".
+- **Page of a list**: a card with a header row (list name, a sort button, a three-dot button), then the task groups. A second card "Completed (N)" that opens and closes. The empty states have a small drawing and the texts "Nothing here yet" with "Add a task to get started", and "All done" with "Every task in this list is complete".
 - **Add button**: a round button at the bottom right. It opens a bottom sheet above the keyboard: a title field, and a row with a details button, a date button, a star button, and "Save". "Save" is disabled when the title is empty. Enter or "Save" adds the task at the top of the list, clears the field, and keeps the sheet open for the next task. A tap outside or Back closes the sheet. On the star tab, the sheet has a list selector and the task gets a star.
 - **Task detail**: a tap on a row opens a full screen that slides in. Top: Back, a list selector, a star, a three-dot menu with "Delete". Then the title, the details, a row "Add date/time", a row "Add deadline", a row for the repeat rule, and the subtasks with "Add subtasks". A wide pill button at the bottom: "Mark completed" or "Mark uncompleted". Changes save as the user types.
 - **Menus** open as bottom sheets.

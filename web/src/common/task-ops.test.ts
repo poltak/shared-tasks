@@ -180,7 +180,7 @@ describe('stopRepeat', () => {
 });
 
 describe('list flows', () => {
-  it('createListFlow asks as Google Tasks does, and gives the id of the new list', async () => {
+  it('createListFlow asks for a name, and gives the id of the new list', async () => {
     promptText.mockResolvedValueOnce('Holiday');
     const id = await ops.createListFlow();
     expect(promptText).toHaveBeenCalledWith(expect.objectContaining({ title: 'Create new list', placeholder: 'Enter name', confirmLabel: 'Done' }));

@@ -20,7 +20,7 @@
   const picture =
     'data:image/svg+xml,' +
     encodeURIComponent(
-      '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" rx="8" fill="#0b57d0"/><circle cx="20" cy="20" r="9" fill="#fff"/></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" rx="8" fill="#3b5bdb"/><circle cx="20" cy="20" r="9" fill="#fff"/></svg>',
     );
 
   let columns = $state<Column[]>([
@@ -218,7 +218,7 @@
             {/each}
           </ul>
           {#if column.tasks.length === 0}
-            <p class="empty">No tasks yet</p>
+            <p class="empty">Nothing here yet</p>
           {/if}
           <p class="done">Completed ({column.done})</p>
         </div>
@@ -246,7 +246,7 @@
     height: 100dvh;
     display: flex;
     flex-direction: column;
-    --dnd-accent: #0b57d0;
+    --dnd-accent: #3b5bdb;
   }
   .tabs {
     flex: none;

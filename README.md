@@ -1,6 +1,6 @@
 # Shared Tasks
 
-A todo list web app for two people. It works like Google Tasks without the Calendar integration. Each device keeps a full copy of the data and works offline. A small server keeps the devices in sync.
+A todo list web app for two people. Its feature set follows Google Tasks, without the Calendar integration. Each device keeps a full copy of the data and works offline. A small server keeps the devices in sync.
 
 `SPEC.md` is the contract for the behaviour and the code.
 

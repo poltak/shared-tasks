@@ -87,8 +87,8 @@ html.dnd-active {
   top: 0;
   box-sizing: border-box;
   border-radius: var(--dnd-lift-radius, 10px);
-  background: color-mix(in srgb, var(--dnd-accent, #1a73e8) 9%, transparent);
-  border: 1px solid color-mix(in srgb, var(--dnd-accent, #1a73e8) 32%, transparent);
+  background: color-mix(in srgb, var(--dnd-accent, #3b5bdb) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dnd-accent, #3b5bdb) 32%, transparent);
   opacity: 0;
   transition:
     transform 140ms var(--dnd-ease),
@@ -104,7 +104,7 @@ html.dnd-active {
   bottom: 7px;
   width: 3px;
   border-radius: 3px;
-  background: var(--dnd-accent, #1a73e8);
+  background: var(--dnd-accent, #3b5bdb);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -44,7 +44,7 @@
 // Looks: set these custom properties on the items, or on an element above them. The engine
 // reads them from the dragged item at the start of a drag.
 //
-//   --dnd-accent        Color of the drop marker. Default #1a73e8.
+//   --dnd-accent        Color of the drop marker. Default #3b5bdb.
 //   --dnd-lift-bg       Background of the lifted copy. Default: the background color of the
 //                       item, or of the nearest element above it, that is fully opaque.
 //   --dnd-lift-radius   Corner radius of the lifted copy and of the marker. Default: the radius

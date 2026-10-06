@@ -60,9 +60,9 @@
     </div>
     {#if groups.length === 0}
       {#if view.completed.length === 0}
-        <EmptyState kind="empty" title="No tasks yet" text="Add your to-dos and keep track of them here" />
+        <EmptyState kind="empty" title="Nothing here yet" text="Add a task to get started" />
       {:else}
-        <EmptyState kind="done" title="All tasks complete" text="Nice work!" />
+        <EmptyState kind="done" title="All done" text="Every task in this list is complete" />
       {/if}
     {/if}
     {#if view.completed.length > 0}
