@@ -20,12 +20,19 @@
       @media (prefers-color-scheme: dark) { html:not([data-theme='light']) { background: #111318; } }
       html[data-theme='dark'] { background: #111318; }
       html, body { margin: 0; height: 100%; }
+      /* A layout can then use a height in percent. The app root itself has no box. */
+      #app { height: 100%; }
     </style>
     <script>
       // Set the theme before the first paint, so a forced theme does not flash.
       try {
         var p = JSON.parse(localStorage.getItem('st.prefs') || '{}');
-        if (p.theme === 'light' || p.theme === 'dark') document.documentElement.dataset.theme = p.theme;
+        if (p.theme === 'light' || p.theme === 'dark') {
+          document.documentElement.dataset.theme = p.theme;
+          // The bar of the browser gets the color of the forced theme, not of the system.
+          var c = p.theme === 'dark' ? '#111318' : '#f6f8fc';
+          document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.content = c; });
+        }
       } catch (e) {}
     </script>
   </head>
