@@ -90,6 +90,8 @@ node server/cli.ts reset-password NAME
 
 The server runs in Termux on an Android phone, behind `tailscale serve`.
 
+The scripts read the address of the phone from `deploy/.env`. Copy `deploy/env.example` to that name and set the values. The file is not in the repository.
+
 First install:
 
 ```bash

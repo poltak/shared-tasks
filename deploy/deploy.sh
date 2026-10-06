@@ -12,7 +12,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 [ -f deploy/.env ] && . deploy/.env
 
-host="${S22_HOST:?Set S22_HOST to the address of the phone}"
+host="${S22_HOST:?Set S22_HOST in deploy/.env. See deploy/env.example}"
 port="${S22_SSH_PORT:-8022}"
 key="${S22_SSH_KEY:-$HOME/.ssh/id_ed25519}"
 

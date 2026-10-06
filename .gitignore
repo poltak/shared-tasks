@@ -5,6 +5,9 @@ web/dist/
 /data/
 .tmp/
 
+# Address and key of the phone for the deploy scripts
+deploy/.env
+
 # Playwright output
 test-results/
 playwright-report/
