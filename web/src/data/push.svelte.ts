@@ -28,6 +28,21 @@ export interface PushInput {
 
 const fail = (message: string): PushResult => ({ ok: false, message });
 
+/**
+ * The text for a subscription that the browser refused. A Chromium browser with no connection to
+ * the push service of Google (some builds remove it) gives the permission and then fails here,
+ * so the text must not send the person to the permission settings.
+ */
+function subscribeFailure(error: unknown): string {
+  const name = error instanceof Error ? error.name : '';
+  const text = error instanceof Error ? error.message : '';
+  if (name === 'NotAllowedError') return 'Notifications are blocked. Permit them for this app in the browser settings';
+  if (name === 'AbortError' || /push service/i.test(text)) {
+    return 'This browser has no push service, so it cannot get notifications. Chrome, Edge, Firefox, and Safari have one';
+  }
+  return 'Notifications could not be turned on';
+}
+
 export function createPush({ device, post, vapidKey }: PushInput): PushStore & {
   /** Reads the state of the device again and sends its subscription to the server. */
   refresh(): Promise<void>;
@@ -70,8 +85,8 @@ export function createPush({ device, post, vapidKey }: PushInput): PushStore & {
         if (reply.data === null) return fail(reply.message);
         enabled = true;
         return { ok: true, message: 'Notifications are on' };
-      } catch {
-        return fail('Notifications could not be turned on');
+      } catch (error) {
+        return fail(subscribeFailure(error));
       }
     },
 
