@@ -73,7 +73,10 @@
     transition: opacity var(--dur-fast) linear;
   }
   svg {
-    position: relative;
+    /* The mark is as large as the box with its border. In the flow it would start inside the
+       border and sit 2px low and to the right, so it is placed over the border like the fill. */
+    position: absolute;
+    inset: -2px;
     transform: scale(0);
     transition: transform var(--dur-fast) var(--ease);
   }
