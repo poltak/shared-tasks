@@ -223,7 +223,7 @@ test.describe('settings', () => {
     expect(new URL(page.url()).pathname).toBe('/');
   });
 
-  test('Back closes the dialog on top first, then Settings', async ({ page }) => {
+  test('Back closes the dialog on top first, then Settings', async ({ page, browserName }) => {
     await signIn(page);
     const dialog = await openSettings(page);
     await dialog.getByRole('button', { name: 'Change password' }).click();
@@ -234,8 +234,9 @@ test.describe('settings', () => {
     await page.goBack();
     await expect(form).toBeHidden();
     await expect(dialog).toBeVisible();
-    // The focus goes back to the control that opened the dialog.
-    await expect(dialog.getByRole('button', { name: 'Change password' })).toBeFocused();
+    // The focus goes back to the control that opened the dialog. Safari does not give the focus
+    // to a button on a click, so there is no control to go back to.
+    if (browserName !== 'webkit') await expect(dialog.getByRole('button', { name: 'Change password' })).toBeFocused();
     await expect.poll(() => historyDepth(page)).toBe(1);
 
     await page.goBack();

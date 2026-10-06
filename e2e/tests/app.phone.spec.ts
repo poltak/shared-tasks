@@ -214,7 +214,8 @@ test.describe('tabs and pages', () => {
     await expect(titles(starred)).toHaveText(['Buy a birthday present']);
   });
 
-  test('a swipe changes the page, and the tab follows', async ({ page }) => {
+  test('a swipe changes the page, and the tab follows', async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'The touch input of this test needs a CDP session, which only Chromium has');
     const touch = await finger(page);
     await touch.swipe({ x: 340, y: 520 }, { x: 60, y: 520 });
     await expect(tab(page, 'Home')).toHaveAttribute('aria-selected', 'true');
@@ -747,6 +748,8 @@ test.describe('lists', () => {
 });
 
 test.describe('drag', () => {
+  test.skip(({ browserName }) => browserName !== 'chromium', 'The touch input of these tests needs a CDP session, which only Chromium has');
+
   test('touch and hold moves a row to a new place', async ({ page }) => {
     const groceries = await goToTab(page, 'Groceries');
     const touch = await finger(page);
@@ -904,7 +907,8 @@ test.describe('Back, reload, and no network', () => {
     await expect(menuItem(page, 'Title')).toHaveAttribute('aria-checked', 'true');
   });
 
-  test('with no network a new task stays after a reload, and reaches the server later', async ({ page, context, browser, baseURL }) => {
+  test('with no network a new task stays after a reload, and reaches the server later', async ({ page, context, browser, baseURL, browserName }) => {
+    test.skip(browserName !== 'chromium', 'The WebKit of Playwright cannot reload a page from the service worker with the network off');
     // The reload with no network needs the service worker and its files.
     await page.evaluate(async () => void (await navigator.serviceWorker.ready));
     const list = panel(page, 'My Tasks');

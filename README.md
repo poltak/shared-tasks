@@ -61,7 +61,8 @@ The test accounts are in `e2e/fixtures/users.json`.
 | `pnpm test` | Unit tests and server tests |
 | `pnpm check` | Type checks |
 | `pnpm build` | Production build into `web/dist` |
-| `pnpm e2e` | Browser tests of the built app, on a desktop and a phone profile |
+| `pnpm e2e` | Browser tests of the built app: a desktop and a phone profile in Chromium, and an iPhone profile in WebKit |
+| `deploy/test-on-phone.sh` | The same browser tests against the code on the phone, with a test database |
 
 ## Server settings
 
