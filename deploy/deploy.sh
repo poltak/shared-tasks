@@ -49,7 +49,8 @@ if ! remote 'grep -q "shared-tasks/start.sh" "$HOME/server/start-all.sh"'; then
 fi
 
 # The restart loop of the phone starts the server again after 5 seconds.
-remote 'pkill -f "server/main.ts" 2>/dev/null || true'
+# The brackets keep pkill from a match on the remote shell that runs this command line.
+remote 'pkill -f "[s]erver/main.ts" 2>/dev/null || true'
 
 echo "Copied. Waiting for the server..."
 i=0
