@@ -136,3 +136,7 @@ To put a database copy back: stop the restart loop and the server, delete `share
 - Notifications need the server to know the task. A task made offline gives no notification until the device syncs.
 - An iPhone shows notifications only for the installed app.
 - Sign-out with no network loses the changes that were not sent. The app warns first.
+
+## Licence
+
+MIT. See `LICENSE`.

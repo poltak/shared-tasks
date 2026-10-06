@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "A todo list web app for two people, with offline use and sync through a small server",
+  "license": "MIT",
   "engines": {
     "node": ">=22.18"
   },
