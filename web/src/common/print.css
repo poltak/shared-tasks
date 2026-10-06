@@ -1,0 +1,74 @@
+/* Rules for paper. The layouts mark their elements, and these rules do the rest:
+   - data-print-hide: app chrome (bars, sidebar, buttons, the add row). Never on paper.
+   - data-print-list="<list id>": the root element of one list. While printList(id) runs, each
+     such element with a different id is hidden, and the chosen one fills the page.
+   - data-print-flow: an ancestor of the lists that scrolls or clips on the screen. On paper it
+     becomes a plain block, so a long list continues on the next page. */
+
+@media print {
+  /* Paper is white. The dark theme would print light text on it. The `html` in each selector
+     makes these rules win over tokens.css in each load order. */
+  html:root,
+  html:root[data-theme],
+  html:root:not([data-theme='light']) {
+    color-scheme: light;
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --surface-2: #ffffff;
+    --surface-3: #f1f1f1;
+    --field: #ffffff;
+    --text: #000000;
+    --text-dim: #444444;
+    --text-off: #777777;
+    --outline: #999999;
+    --divider: #cccccc;
+    --primary: #1c2f7a;
+    --danger: #a01815;
+    --star: #000000;
+    --shadow-1: none;
+    --shadow-2: none;
+    --shadow-3: none;
+  }
+
+  html,
+  body,
+  #app {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+  }
+
+  [data-print-hide] {
+    display: none !important;
+  }
+
+  [data-print-flow] {
+    display: block !important;
+    position: static !important;
+    width: auto !important;
+    height: auto !important;
+    max-height: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    transform: none !important;
+  }
+
+  [data-print-list] {
+    break-inside: auto;
+    box-shadow: none !important;
+  }
+
+  html[data-printing] [data-print-list] {
+    position: static !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    max-height: none !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    border: 0 !important;
+    transform: none !important;
+  }
+}
