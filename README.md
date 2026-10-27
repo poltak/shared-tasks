@@ -1,6 +1,6 @@
 # Shared Tasks
 
-A todo list web app for two people. Its feature set follows Google Tasks, without the Calendar integration. Each device keeps a full copy of the data and works offline. A small server keeps the devices in sync.
+A todo list web app for two people. Its feature set follows Google Tasks, without the Calendar integration. It also has notes like Google Keep. Each device keeps a full copy of the data and works offline. A small server keeps the devices in sync.
 
 `SPEC.md` is the contract for the behaviour and the code.
 
@@ -10,6 +10,7 @@ A todo list web app for two people. Its feature set follows Google Tasks, withou
 - Five sort modes for each list, a "Completed" section, and Undo for each action.
 - Two layouts. A phone gets tabs, an add sheet, and a full task screen. A wide window gets a sidebar and one column for each list, with edit in place, keyboard shortcuts, and drag and drop.
 - Two accounts. Each list is private or shared. In a shared list, the two people see and change the same tasks. The star, the sort mode, the list order, and the hidden columns are separate for each person.
+- Notes like Google Keep: a title, a body, and one of 12 colors, in a grid with pinned notes at the top. Search, archive, and delete with Undo. "Make tasks" turns a note, or each line of it, into tasks in a list. A note is private or shared, like a list. Pin and archive are separate for each person.
 - Notifications through Web Push for a task time (or 09:00 for a date with no time) and for a deadline.
 - It installs to the home screen and starts with no network.
 
@@ -23,6 +24,8 @@ A todo list web app for two people. Its feature set follows Google Tasks, withou
 4. For notifications, open Settings (the round button at the top right) and set "Notifications" to on. An iPhone permits this only in the installed app.
 
 To share a list, open the list menu (three dots) and select "Share with NAME".
+
+Notes are on the Notes tab next to the star tab on a phone, and under "Notes" in the sidebar on a wide screen. To share a note, open its menu (three dots) and select "Share with NAME".
 
 ## How it is built
 
@@ -136,6 +139,8 @@ To put a database copy back: stop the restart loop and the server, delete `share
 - Notifications need the server to know the task. A task made offline gives no notification until the device syncs.
 - An iPhone shows notifications only for the installed app.
 - Sign-out with no network loses the changes that were not sent. The app warns first.
+- When two people change the text of one note at the same time, the later change wins for the full title or body.
+- The notes update adds a database migration. After it, the `app.old` copy cannot start on the database. `SPEC.md` section 11 tells how to go back if necessary.
 
 ## Licence
 
