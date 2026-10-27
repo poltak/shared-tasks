@@ -1,7 +1,18 @@
 import { describe, expect, test } from 'vitest';
-import type { ListRow, ListView, RepeatRule, SortMode, TaskRow } from './types.ts';
-import { defaultList, defaultTask } from './merge.ts';
-import { buildListView, buildStarredView, comparePos, isOpen, isParentOf, isResting, orderLists } from './view.ts';
+import type { ListRow, ListView, NoteRow, NotesView, RepeatRule, SortMode, TaskRow } from './types.ts';
+import { defaultList, defaultNote, defaultTask } from './merge.ts';
+import {
+  buildListView,
+  buildNotesView,
+  buildStarredView,
+  compareNotes,
+  comparePos,
+  isOpen,
+  isParentOf,
+  isResting,
+  noteTaskTitles,
+  orderLists,
+} from './view.ts';
 
 /** A Tuesday. */
 const TODAY = '2026-10-06';
@@ -843,5 +854,237 @@ describe('speed with 5000 tasks in one list', () => {
     // On the Mac of the project: my 1.5 ms, date 2.5 ms, deadline 2.8 ms, starred 1.8 ms, title 5.5 ms.
     // The limit has room for a slower computer, and a loop in a loop over 5000 rows is far above it.
     for (const [name, ms] of Object.entries(times)) expect(ms, name).toBeLessThan(40);
+  });
+});
+
+// ---- Notes ----
+
+let noteCounter = 0;
+/** A note of u1. Each new note is newer than the note before it. */
+function n(id: string, fields: Partial<NoteRow> = {}): NoteRow {
+  noteCounter++;
+  return { ...defaultNote(id), owner: 'u1', title: id, createdAt: 1000 + noteCounter, editedAt: 1000 + noteCounter, ...fields };
+}
+
+function notesView(notes: NoteRow[], archived = false, query = '', locale = LOCALE): NotesView {
+  return buildNotesView({ notes, archived, query, locale });
+}
+
+/** The ids of the two parts. */
+function parts(v: NotesView): { pinned: string[]; others: string[] } {
+  return { pinned: v.pinned.map((note) => note.id), others: v.others.map((note) => note.id) };
+}
+
+describe('buildNotesView', () => {
+  test('the notes: pinned notes, then the others; no archived and no deleted note', () => {
+    const notes = [
+      n('a'),
+      n('b', { pinned: true }),
+      n('c', { archived: true }),
+      n('d', { deleted: true }),
+      n('e', { pinned: true, deleted: true }),
+      n('f'),
+      n('g', { pinned: true }),
+    ];
+    expect(parts(notesView(notes))).toEqual({ pinned: ['g', 'b'], others: ['f', 'a'] });
+  });
+
+  test('the archive: all archived notes in the others, and no pinned part', () => {
+    const notes = [n('a'), n('b', { archived: true }), n('c', { archived: true, deleted: true }), n('d', { archived: true }), n('e', { pinned: true })];
+    expect(parts(notesView(notes, true))).toEqual({ pinned: [], others: ['d', 'b'] });
+  });
+
+  test('a note that sync made pinned and archived is only in the archive', () => {
+    const notes = [n('both', { pinned: true, archived: true }), n('p', { pinned: true })];
+    expect(parts(notesView(notes))).toEqual({ pinned: ['p'], others: [] });
+    expect(parts(notesView(notes, true))).toEqual({ pinned: [], others: ['both'] });
+  });
+
+  test('newest first by the creation time, then by id; an edit does not move a note', () => {
+    const notes = [
+      n('old', { createdAt: 10, editedAt: 99_999 }),
+      n('new', { createdAt: 30, editedAt: 30 }),
+      n('b', { createdAt: 20 }),
+      n('a', { createdAt: 20 }),
+      n('pinOld', { createdAt: 1, pinned: true }),
+      n('pinNew', { createdAt: 2, pinned: true }),
+    ];
+    expect(parts(notesView(notes))).toEqual({ pinned: ['pinNew', 'pinOld'], others: ['new', 'a', 'b', 'old'] });
+    expect(parts(notesView([...notes].reverse()))).toEqual(parts(notesView(notes)));
+    expect(compareNotes(notes[2]!, notes[3]!)).toBeGreaterThan(0);
+    expect(compareNotes(notes[0]!, notes[0]!)).toBe(0);
+  });
+
+  test('a note of the other person is in the view like a note of this person', () => {
+    expect(parts(notesView([n('mine'), n('theirs', { owner: 'u2', shared: true })]))).toEqual({ pinned: [], others: ['theirs', 'mine'] });
+  });
+
+  test('gives the row objects, does not change the input, and takes the values of a Map', () => {
+    const notes = [n('a'), n('b', { pinned: true })];
+    const before = structuredClone(notes);
+    const v = notesView(notes);
+    expect(v.pinned[0]).toBe(notes[1]);
+    expect(v.others[0]).toBe(notes[0]);
+    expect(notes).toEqual(before);
+    const map = new Map(notes.map((note) => [note.id, note]));
+    expect(parts(buildNotesView({ notes: map.values(), archived: false, query: '', locale: LOCALE }))).toEqual(parts(v));
+    expect(notesView([])).toEqual({ pinned: [], others: [] });
+  });
+
+  describe('search', () => {
+    const notes = [
+      n('shop', { title: 'Groceries', body: 'Milk\nEggs\nBread' }),
+      n('cafe', { title: 'Café list', body: 'Flat white' }),
+      n('pho', { title: '', body: 'Phở bò ở Hà Nội' }),
+      n('caps', { title: 'MEETING NOTES', body: 'Agenda', pinned: true }),
+      n('old', { title: 'Old milk', archived: true }),
+    ];
+    const search = (query: string, archived = false, locale = LOCALE): string[] => {
+      const v = notesView(notes, archived, query, locale);
+      return [...v.pinned, ...v.others].map((note) => note.id);
+    };
+
+    test('an empty query, or a query of spaces, keeps all notes', () => {
+      expect(search('')).toEqual(['caps', 'pho', 'cafe', 'shop']);
+      expect(search('   \t ')).toEqual(['caps', 'pho', 'cafe', 'shop']);
+    });
+
+    test('a word of the title or of the body, in a part of a word', () => {
+      expect(search('groc')).toEqual(['shop']);
+      expect(search('eggs')).toEqual(['shop']);
+      expect(search('white')).toEqual(['cafe']);
+      expect(search('zebra')).toEqual([]);
+    });
+
+    test('each word must be in the note, in the title or the body', () => {
+      expect(search('milk bread')).toEqual(['shop']);
+      expect(search('groceries bread')).toEqual(['shop']);
+      expect(search('milk white')).toEqual([]);
+      expect(search('  milk    eggs  ')).toEqual(['shop']);
+      // The end of the title and the start of the body are not one word.
+      expect(search('listflat')).toEqual([]);
+      expect(search('list flat')).toEqual(['cafe']);
+    });
+
+    test('ignores case and accents in the query and in the note', () => {
+      expect(search('MILK')).toEqual(['shop']);
+      expect(search('meeting')).toEqual(['caps']);
+      expect(search('cafe')).toEqual(['cafe']);
+      expect(search('CAFÉ')).toEqual(['cafe']);
+      expect(search('pho bo')).toEqual(['pho']);
+      expect(search('ha noi')).toEqual(['pho']);
+      expect(search('Hà Nội', false, 'vi-VN')).toEqual(['pho']);
+      // A query in the other normal form of Unicode.
+      expect(search('cafe\u0301')).toEqual(['cafe']);
+      expect(search('caf\u00e9'.normalize('NFD'))).toEqual(['cafe']);
+    });
+
+    test('in the archive', () => {
+      expect(search('milk', true)).toEqual(['old']);
+      expect(search('bread', true)).toEqual([]);
+    });
+
+    test('the lower case of the locale', () => {
+      const light = [n('light', { title: 'IŞIK' })];
+      // In Turkish, the lower case of I is the dotless ı.
+      expect(notesView(light, false, 'ışık', 'tr-TR').others.map((note) => note.id)).toEqual(['light']);
+      expect(notesView(light, false, 'ışık', 'en-GB').others).toEqual([]);
+      expect(notesView(light, false, 'isik', 'en-GB').others.map((note) => note.id)).toEqual(['light']);
+      expect(notesView([n('city', { title: 'İzmir' })], false, 'izmir', 'en-GB').others.map((note) => note.id)).toEqual(['city']);
+    });
+
+    test('a locale tag that is not valid does not throw', () => {
+      expect(search('milk', false, 'not a tag')).toEqual(['shop']);
+      expect(search('MILK', false, '')).toEqual(['shop']);
+    });
+
+    test('a changed note is found with its new text', () => {
+      const first = n('x', { body: 'apples' });
+      expect(notesView([first], false, 'apples').others).toHaveLength(1);
+      const changed = { ...first, body: 'pears' };
+      expect(notesView([changed], false, 'apples').others).toHaveLength(0);
+      expect(notesView([changed], false, 'pears').others).toHaveLength(1);
+      // The same object with a new text, from code that changed a row in place.
+      const mutable = { ...first };
+      expect(notesView([mutable], false, 'apples').others).toHaveLength(1);
+      mutable.body = 'plums';
+      expect(notesView([mutable], false, 'apples').others).toHaveLength(0);
+      expect(notesView([mutable], false, 'plums').others).toHaveLength(1);
+    });
+  });
+
+  test('a search through many long notes at each key is fast', () => {
+    const many: NoteRow[] = [];
+    const words = ['milk', 'eggs', 'bread', 'café', 'phở', 'meeting', 'garden', 'holiday'];
+    for (let i = 0; i < 1000; i++) {
+      many.push(n('m' + i, { title: `Note ${i}`, body: Array.from({ length: 100 }, (_, j) => words[(i + j) % words.length]).join(' ') + (i === 500 ? ' zebra' : '') }));
+    }
+    let ms = Infinity;
+    for (let round = 0; round < 3; round++) {
+      const started = performance.now();
+      for (const query of ['z', 'ze', 'zeb', 'zebr', 'zebra', 'zebra m', 'zebra mi']) notesView(many, false, query);
+      ms = Math.min(ms, performance.now() - started);
+    }
+    expect(notesView(many, false, 'zebra').others.map((note) => note.id)).toEqual(['m500']);
+    // The first round makes the search text of each note. Each later key reads it again.
+    expect(ms).toBeLessThan(150);
+  });
+});
+
+describe('noteTaskTitles', () => {
+  test('the examples of SPEC.md', () => {
+    expect(noteTaskTitles('  - [ ] Milk')).toEqual(['Milk']);
+    expect(noteTaskTitles('- [x] Eggs')).toEqual([]);
+    expect(noteTaskTitles('1) Bread')).toEqual(['Bread']);
+    expect(noteTaskTitles('12. Jam')).toEqual(['Jam']);
+    expect(noteTaskTitles('• Tea')).toEqual(['Tea']);
+    expect(noteTaskTitles('+ Rice')).toEqual(['Rice']);
+    expect(noteTaskTitles('[] Salt')).toEqual(['Salt']);
+    expect(noteTaskTitles('* Butter')).toEqual(['Butter']);
+  });
+
+  test('each line in order; empty lines give nothing', () => {
+    expect(noteTaskTitles('Milk\n\n  \nEggs\n\t\nBread\n')).toEqual(['Milk', 'Eggs', 'Bread']);
+    expect(noteTaskTitles('')).toEqual([]);
+    expect(noteTaskTitles('\n\n')).toEqual([]);
+    expect(noteTaskTitles('a\r\nb\rc\nd')).toEqual(['a', 'b', 'c', 'd']);
+    expect(noteTaskTitles('  Call mum about Sunday  ')).toEqual(['Call mum about Sunday']);
+  });
+
+  test('a checked line gives nothing, with or without a marker before it', () => {
+    expect(noteTaskTitles('[x] Eggs\n[X] Ham\n* [X] Jam\n3. [x] Tea\n- [x]\n[x]Bread')).toEqual([]);
+    // A check that is not at the start is part of the title.
+    expect(noteTaskTitles('Buy [x] things')).toEqual(['Buy [x] things']);
+  });
+
+  test('only one marker is removed, and only with a space after it', () => {
+    expect(noteTaskTitles('- - Milk')).toEqual(['- Milk']);
+    expect(noteTaskTitles('-Milk\n1.5 kg flour\n2)Eggs\na. Apple')).toEqual(['-Milk', '1.5 kg flour', '2)Eggs', 'a. Apple']);
+    expect(noteTaskTitles('1. 2. Two')).toEqual(['2. Two']);
+    // The check box comes after the marker, not before it.
+    expect(noteTaskTitles('[ ] - Milk')).toEqual(['- Milk']);
+    expect(noteTaskTitles('[ ] [x] y')).toEqual(['[x] y']);
+    expect(noteTaskTitles('[ ] [ ] y')).toEqual(['[ ] y']);
+  });
+
+  test('an open check box and spaces around the parts', () => {
+    expect(noteTaskTitles('-    [ ]    Milk   ')).toEqual(['Milk']);
+    expect(noteTaskTitles('[ ]Milk\n[]Eggs\n10)   [ ] Bread')).toEqual(['Milk', 'Eggs', 'Bread']);
+    // A line with only a marker or a check box gives nothing.
+    expect(noteTaskTitles('- [ ]\n[ ]\n[]\n1. []')).toEqual([]);
+    // A marker with no space after it is text.
+    expect(noteTaskTitles('-\n•')).toEqual(['-', '•']);
+  });
+
+  test('the markers of SPEC.md and no others', () => {
+    expect(noteTaskTitles('# Heading\n> quote\n– dash')).toEqual(['# Heading', '> quote', '– dash']);
+  });
+
+  test('a long body', () => {
+    const body = Array.from({ length: 500 }, (_, i) => `${i + 1}. Item ${i + 1}`).join('\n');
+    const titles = noteTaskTitles(body);
+    expect(titles).toHaveLength(500);
+    expect(titles[0]).toBe('Item 1');
+    expect(titles[499]).toBe('Item 500');
   });
 });

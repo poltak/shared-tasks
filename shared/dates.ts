@@ -2,8 +2,8 @@ import type { DateStr, TimeStr } from './types.ts';
 
 // A date is a calendar day with no time zone. All math is on a day number (days from 1970-01-01),
 // so the time zone and the daylight saving of the device cannot change a result. Only todayOf(),
-// toJsDate(), fromJsDate(), and completedText() use the local time of the device, because "today"
-// is a local idea.
+// toJsDate(), fromJsDate(), completedText(), and editedText() use the local time of the device,
+// because "today" is a local idea.
 
 const DAY_MS = 86_400_000;
 
@@ -359,6 +359,35 @@ export function groupHeading({ date, today, locale }: { date: DateStr; today: Da
 /** "Completed: Mon 5 Oct". `at` is a time in milliseconds. The date is the local date of the device. */
 export function completedText({ at, today, locale }: { at: number; today?: DateStr; locale: string }): string {
   return 'Completed: ' + formatDate({ date: todayOf(at), today, locale });
+}
+
+const yearFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** "5 Oct 2025": a date in a different year, where the weekday helps less than the year. */
+function dateWithYear({ date, locale }: { date: DateStr; locale: string }): string {
+  const n = names(locale, 'short');
+  if (n.whole) {
+    let f = yearFormatters.get(locale);
+    if (!f) yearFormatters.set(locale, (f = formatter(locale, { day: 'numeric', month: 'short', year: 'numeric' })));
+    return f.format(dayNumber(date) * DAY_MS);
+  }
+  const { year, month, day } = parse(date);
+  return `${day} ${n.months[month - 1]} ${year}`;
+}
+
+/**
+ * The time of the last edit of a note: "Edited 14:30" today, "Edited yesterday", "Edited Mon 5 Oct"
+ * for a different day, and "Edited 5 Oct 2025" for a different year. `at` is a time in
+ * milliseconds. The date and the time are the local values of the device.
+ */
+export function editedText({ at, today, locale }: { at: number; today: DateStr; locale: string }): string {
+  const d = new Date(at);
+  const date = todayOf(d);
+  const days = diffDays(date, today);
+  if (days === 0) return 'Edited ' + timeText({ time: `${pad(d.getHours())}:${pad(d.getMinutes())}`, locale });
+  if (days === -1) return 'Edited yesterday';
+  if (date.slice(0, 4) === today.slice(0, 4)) return 'Edited ' + formatDate({ date, locale });
+  return 'Edited ' + dateWithYear({ date, locale });
 }
 
 /**

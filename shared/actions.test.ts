@@ -1,35 +1,44 @@
 import { describe, expect, test } from 'vitest';
-import type { ActionResult, ID, ListRow, Put, RepeatRule, TaskRow } from './types.ts';
-import { LIMITS } from './types.ts';
+import type { ActionResult, ID, ListRow, NoteColor, NoteRow, Put, RepeatRule, TaskRow } from './types.ts';
+import { LIMITS, NOTE_COLORS } from './types.ts';
 import type { ActionContext } from './actions.ts';
+import * as allActions from './actions.ts';
 import {
   clearCompleted,
   completeTask,
   createList,
+  createNote,
   createTask,
   deleteList,
+  deleteNote,
   deleteTask,
   indentTask,
   moveList,
   moveTask,
   moveToTop,
+  noteToTasks,
   renameList,
   setDate,
   setListHidden,
   setListShared,
   setListSort,
+  setNoteArchived,
+  setNoteColor,
+  setNotePinned,
+  setNoteShared,
   setRepeat,
   setStar,
   uncompleteTask,
   unindentTask,
+  updateNote,
   updateTask,
 } from './actions.ts';
 import type { Rows } from './merge.ts';
-import { applyPuts, defaultList, defaultTask, emptyRows } from './merge.ts';
+import { applyPuts, defaultList, defaultNote, defaultTask, emptyRows } from './merge.ts';
 import { keyBetween } from './fracindex.ts';
 import { addDays, isValidDate, isValidTime } from './dates.ts';
 import { nextOccurrence, validateRule } from './recurrence.ts';
-import { buildListView, comparePos, isOpen, isParentOf, isResting, orderLists } from './view.ts';
+import { buildListView, comparePos, isOpen, isParentOf, isResting, noteTaskTitles, orderLists } from './view.ts';
 
 /** A Tuesday. */
 const TODAY = '2026-10-06';
@@ -43,6 +52,8 @@ const WEEKLY: RepeatRule = { every: 1, unit: 'week', weekdays: [2], start: '2026
 
 const TASK_FIELDS = Object.keys(defaultTask('x')).filter((key) => key !== 'id').sort();
 const LIST_FIELDS = Object.keys(defaultList('x')).filter((key) => key !== 'id').sort();
+const NOTE_FIELDS = Object.keys(defaultNote('x')).filter((key) => key !== 'id').sort();
+const ALL_FIELDS = { list: LIST_FIELDS, task: TASK_FIELDS, note: NOTE_FIELDS };
 
 function freeze<T extends object>(row: T): T {
   for (const value of Object.values(row)) if (typeof value === 'object' && value !== null) freeze(value);
@@ -76,6 +87,13 @@ function world() {
       rows.tasks.set(id, row);
       return row;
     },
+    /** A note of ME. Each new note is newer than the note before it. */
+    note(id: ID, fields: Partial<NoteRow> = {}): NoteRow {
+      const createdAt = 3000 + rows.notes.size;
+      const row = freeze({ ...defaultNote(id), title: id, owner: ME, createdAt, editedAt: createdAt, editedBy: ME, ...fields });
+      rows.notes.set(id, row);
+      return row;
+    },
   };
 }
 
@@ -92,7 +110,9 @@ function standard() {
   return w;
 }
 
-const copy = (rows: Rows): Rows => ({ lists: new Map(rows.lists), tasks: new Map(rows.tasks) });
+const copy = (rows: Rows): Rows => ({ lists: new Map(rows.lists), tasks: new Map(rows.tasks), notes: new Map(rows.notes) });
+
+const mapOf = (rows: Rows, kind: Put['kind']): Map<ID, object> => (kind === 'list' ? rows.lists : kind === 'task' ? rows.tasks : rows.notes);
 
 type Action<I> = (ctx: ActionContext, intent: I) => ActionResult;
 
@@ -107,11 +127,20 @@ function act<I>(rows: Rows, action: Action<I>, intent: I, overrides: Partial<Act
   // The action does not change the rows that it reads.
   expect([...rows.lists.entries()]).toEqual([...before.lists.entries()]);
   expect([...rows.tasks.entries()]).toEqual([...before.tasks.entries()]);
+  expect([...rows.notes.entries()]).toEqual([...before.notes.entries()]);
   for (const [id, row] of before.tasks) expect(rows.tasks.get(id)).toBe(row);
   for (const [id, row] of before.lists) expect(rows.lists.get(id)).toBe(row);
+  for (const [id, row] of before.notes) expect(rows.notes.get(id)).toBe(row);
+
+  // The delete of a note that the person emptied again has no undo, so the empty note cannot come back.
+  const discard = (action as unknown) === deleteNote && (intent as { discard?: boolean }).discard === true;
+  if (discard) {
+    expect(result.undo).toEqual([]);
+    expect(result.message).toBeNull();
+  }
 
   // One put and one undo put for each changed row, each with at least one field, and safe for JSON.
-  expect(result.undo).toHaveLength(result.puts.length);
+  if (!discard) expect(result.undo).toHaveLength(result.puts.length);
   expect(new Set(result.puts.map((put) => put.kind + put.id)).size).toBe(result.puts.length);
   for (const put of [...result.puts, ...result.undo]) expect(Object.keys(put.fields).length).toBeGreaterThan(0);
   expect(JSON.parse(JSON.stringify(result.puts))).toEqual(result.puts);
@@ -120,27 +149,25 @@ function act<I>(rows: Rows, action: Action<I>, intent: I, overrides: Partial<Act
 
   // A put that makes a row has all fields of the row.
   for (const put of result.puts) {
-    const exists = put.kind === 'task' ? rows.tasks.has(put.id) : rows.lists.has(put.id);
-    if (!exists) expect(Object.keys(put.fields).sort()).toEqual(put.kind === 'task' ? TASK_FIELDS : LIST_FIELDS);
+    if (!mapOf(rows, put.kind).has(put.id)) expect(Object.keys(put.fields).sort()).toEqual(ALL_FIELDS[put.kind]);
   }
 
   const after = copy(rows);
   applyPuts(after, result.puts);
   // The next action in a test must not change these rows too.
-  for (const row of [...after.tasks.values(), ...after.lists.values()]) freeze(row);
+  for (const row of [...after.tasks.values(), ...after.lists.values(), ...after.notes.values()]) freeze(row);
+  if (discard) return { ...result, rows: after };
 
   // The undo brings back the start. A row that the action made is deleted.
   const undone = copy(after);
   applyPuts(undone, result.undo);
-  expect(undone.tasks.size).toBe(after.tasks.size);
-  expect(undone.lists.size).toBe(after.lists.size);
-  for (const [id, row] of undone.tasks) {
-    if (rows.tasks.has(id)) expect(row).toEqual(rows.tasks.get(id));
-    else expect(row.deleted).toBe(true);
-  }
-  for (const [id, row] of undone.lists) {
-    if (rows.lists.has(id)) expect(row).toEqual(rows.lists.get(id));
-    else expect(row.deleted).toBe(true);
+  for (const kind of ['list', 'task', 'note'] as const) {
+    const start = mapOf(rows, kind);
+    expect(mapOf(undone, kind).size).toBe(mapOf(after, kind).size);
+    for (const [id, row] of mapOf(undone, kind)) {
+      if (start.has(id)) expect(row).toEqual(start.get(id));
+      else expect((row as { deleted: boolean }).deleted).toBe(true);
+    }
   }
   return { ...result, rows: after };
 }
@@ -158,6 +185,7 @@ function completedIds(rows: Rows, listId: ID = 'l1', today = TODAY): string[] {
 
 const task = (rows: Rows, id: ID): TaskRow => rows.tasks.get(id)!;
 const list = (rows: Rows, id: ID): ListRow => rows.lists.get(id)!;
+const note = (rows: Rows, id: ID): NoteRow => rows.notes.get(id)!;
 const listOrder = (rows: Rows): string[] => orderLists(rows.lists.values()).map((each) => each.id);
 
 test('the standard rows show as expected', () => {
@@ -1526,6 +1554,743 @@ describe('clearCompleted', () => {
   });
 });
 
+// ---- Notes ----
+
+/** l1 "Groceries" with the tasks a, b (with b1), and c. n1 is a note of ME, theirs a shared note of OTHER. */
+function withNotes() {
+  const w = standard();
+  w.rows.lists.set('l1', freeze({ ...list(w.rows, 'l1'), title: 'Groceries' }));
+  w.note('n1', { title: 'Shopping', body: 'Milk\nEggs' });
+  w.note('theirs', { owner: OTHER, shared: true, title: 'Gift ideas', body: 'Book', editedBy: OTHER });
+  return w;
+}
+
+/** The ids of the open tasks of the list in "My order", with the title for a task that an action made. */
+function shownTitles(rows: Rows, listId: ID = 'l1'): string[] {
+  return shown(rows, listId).map((id) => {
+    const trimmed = id.trim();
+    return rows.tasks.has(trimmed) && /^[A-Za-z0-9_-]{36}$/.test(trimmed) ? task(rows, trimmed).title : id;
+  });
+}
+
+test('each value export of actions.ts is an action, because the data layer makes an action of each one', () => {
+  for (const [name, value] of Object.entries(allActions)) expect(typeof value, name).toBe('function');
+  for (const name of ['createNote', 'updateNote', 'setNoteColor', 'setNotePinned', 'setNoteArchived', 'setNoteShared', 'deleteNote', 'noteToTasks']) {
+    expect(name in allActions, name).toBe(true);
+  }
+});
+
+describe('createNote', () => {
+  test('one put with all fields, and an undo that deletes the note', () => {
+    const { rows } = withNotes();
+    const result = act(rows, createNote, { id: 'n', title: 'Ideas', body: 'One\nTwo' });
+    expect(result.message).toBeNull();
+    expect(result.puts).toHaveLength(1);
+    expect(result.puts[0]).toMatchObject({ kind: 'note', id: 'n' });
+    expect(Object.keys(result.puts[0]!.fields).sort()).toEqual(NOTE_FIELDS);
+    expect(note(result.rows, 'n')).toEqual({
+      ...defaultNote('n'),
+      title: 'Ideas',
+      body: 'One\nTwo',
+      color: 'default',
+      shared: false,
+      editedAt: NOW,
+      editedBy: ME,
+      deleted: false,
+      owner: ME,
+      createdAt: NOW,
+      pinned: false,
+      archived: false,
+    });
+    expect(result.undo).toEqual([{ kind: 'note', id: 'n', fields: { deleted: true } }]);
+    result.puts.forEach(expectServerAccepts);
+  });
+
+  test('makes an id when the intent has none', () => {
+    const result = act(emptyRows(), createNote, { body: 'x' });
+    const id = result.puts[0]!.id;
+    expect(id).toMatch(/^[A-Za-z0-9_-]{36}$/);
+    expect(note(result.rows, id).body).toBe('x');
+    expect(act(emptyRows(), createNote, { body: 'x' }).puts[0]!.id).not.toBe(id);
+  });
+
+  test('a title with no body, and a body with no title', () => {
+    const { rows } = withNotes();
+    expect(note(act(rows, createNote, { id: 'n', title: 'Only a title' }).rows, 'n')).toMatchObject({ title: 'Only a title', body: '' });
+    expect(note(act(rows, createNote, { id: 'n', body: 'Only a body' }).rows, 'n')).toMatchObject({ title: '', body: 'Only a body' });
+    expect(note(act(rows, createNote, { id: 'n', title: '', body: 'x' }).rows, 'n')).toMatchObject({ title: '', body: 'x' });
+  });
+
+  test('no note when the title and the body are both empty after trim', () => {
+    const { rows } = withNotes();
+    for (const intent of [{}, { title: '' }, { body: '' }, { title: '  ', body: ' \n\t ' }, { title: '\n\r\n' }, { title: '', body: '\n\n' }]) {
+      expect(act(rows, createNote, { id: 'n', ...intent })).toMatchObject({ puts: [], undo: [], message: null });
+    }
+  });
+
+  test('no note for an id that a note has, also a deleted note', () => {
+    const w = withNotes();
+    w.note('dead', { deleted: true });
+    expect(act(w.rows, createNote, { id: 'n1', title: 'x' }).puts).toEqual([]);
+    expect(act(w.rows, createNote, { id: 'theirs', title: 'x' }).puts).toEqual([]);
+    expect(act(w.rows, createNote, { id: 'dead', title: 'x' }).puts).toEqual([]);
+    // A task or a list with that id is a different row.
+    expect(act(w.rows, createNote, { id: 'a', title: 'x' }).puts).toHaveLength(1);
+    expect(act(w.rows, createNote, { id: 'l1', title: 'x' }).puts).toHaveLength(1);
+  });
+
+  test('the text is kept as typed, because the editor makes the note at the first key', () => {
+    const { rows } = withNotes();
+    const result = act(rows, createNote, { id: 'n', title: ' a', body: '  first line \n' });
+    expect(note(result.rows, 'n')).toMatchObject({ title: ' a', body: '  first line \n' });
+  });
+
+  test('a title loses its line breaks: each run becomes one space', () => {
+    const { rows } = withNotes();
+    expect(note(act(rows, createNote, { id: 'n', title: 'Shop\nping' }).rows, 'n').title).toBe('Shop ping');
+    expect(note(act(rows, createNote, { id: 'n', title: 'a\r\n\r\nb\rc\n' }).rows, 'n').title).toBe('a b c ');
+    // The body keeps its line breaks.
+    expect(note(act(rows, createNote, { id: 'n', title: 'x', body: 'a\n\nb' }).rows, 'n').body).toBe('a\n\nb');
+  });
+
+  test('the text is cut to the limits', () => {
+    const { rows } = withNotes();
+    const result = act(rows, createNote, { id: 'n', title: 't'.repeat(LIMITS.noteTitle + 50), body: 'b'.repeat(LIMITS.noteBody + 50) });
+    expect(note(result.rows, 'n').title).toBe('t'.repeat(LIMITS.noteTitle));
+    expect(note(result.rows, 'n').body).toBe('b'.repeat(LIMITS.noteBody));
+    // An emoji at the limit is not cut in two.
+    const emoji = act(rows, createNote, { id: 'n', title: 't'.repeat(LIMITS.noteTitle - 1) + '😀', body: 'b'.repeat(LIMITS.noteBody - 1) + '😀' });
+    expect(note(emoji.rows, 'n').title).toBe('t'.repeat(LIMITS.noteTitle - 1));
+    expect(note(emoji.rows, 'n').body).toBe('b'.repeat(LIMITS.noteBody - 1));
+    // Two line breaks that become one space make room for one more character.
+    const breaks = act(rows, createNote, { id: 'n', title: 'a\r\n' + 'x'.repeat(LIMITS.noteTitle) });
+    expect(note(breaks.rows, 'n').title).toBe('a ' + 'x'.repeat(LIMITS.noteTitle - 2));
+    for (const each of [result, emoji, breaks]) each.puts.forEach(expectServerAccepts);
+  });
+
+  test('the color, the pin, and the share of the intent', () => {
+    const { rows } = withNotes();
+    for (const color of NOTE_COLORS) expect(note(act(rows, createNote, { id: 'n', title: 'x', color }).rows, 'n').color).toBe(color);
+    const result = act(rows, createNote, { id: 'n', title: 'x', color: 'darkblue', pinned: true, shared: true });
+    expect(note(result.rows, 'n')).toMatchObject({ color: 'darkblue', pinned: true, shared: true, archived: false });
+  });
+
+  test('an unknown color gives the default color', () => {
+    const { rows } = withNotes();
+    for (const color of ['coral', 'none', '', 'Red', 'constructor'] as unknown as NoteColor[]) {
+      const result = act(rows, createNote, { id: 'n', title: 'x', color });
+      expect(note(result.rows, 'n').color).toBe('default');
+      result.puts.forEach(expectServerAccepts);
+    }
+  });
+});
+
+test('the editor flow: a note at the first key, a change at each later key, and a discard when the person empties it', () => {
+  const { rows: start } = withNotes();
+  const made = act(start, createNote, { id: 'n', body: 'H' });
+  const typed = act(made.rows, updateNote, { id: 'n', body: 'Hi' }, { now: NOW + 1000 });
+  const titled = act(typed.rows, updateNote, { id: 'n', title: 'T' }, { now: NOW + 2000 });
+  const emptied = act(titled.rows, updateNote, { id: 'n', title: '', body: '' }, { now: NOW + 3000 });
+  expect(note(emptied.rows, 'n')).toMatchObject({ title: '', body: '', createdAt: NOW, editedAt: NOW + 3000, deleted: false });
+  const discarded = act(emptied.rows, deleteNote, { id: 'n', discard: true });
+  expect(discarded).toMatchObject({ undo: [], message: null });
+  expect(note(discarded.rows, 'n').deleted).toBe(true);
+  // A later key for the discarded note changes nothing.
+  expect(act(discarded.rows, updateNote, { id: 'n', body: 'x' }).puts).toEqual([]);
+});
+
+describe('updateNote', () => {
+  test('a change of the title also sets the time and the person of the edit; the undo puts back the old values', () => {
+    const { rows } = withNotes();
+    const result = act(rows, updateNote, { id: 'n1', title: 'Shopping list' });
+    expect(result.message).toBeNull();
+    expect(result.puts).toEqual([{ kind: 'note', id: 'n1', fields: { title: 'Shopping list', editedAt: NOW, editedBy: ME } }]);
+    expect(result.undo).toEqual([{ kind: 'note', id: 'n1', fields: { title: 'Shopping', editedAt: 3000, editedBy: ME } }]);
+    const back = copy(result.rows);
+    applyPuts(back, result.undo);
+    expect(note(back, 'n1')).toEqual(note(rows, 'n1'));
+  });
+
+  test('the other person can change the text of a shared note, and is then the person of the edit', () => {
+    const { rows } = withNotes();
+    const result = act(rows, updateNote, { id: 'n1', body: 'Milk\nEggs\nBread' }, { me: OTHER });
+    expect(result.puts).toEqual([{ kind: 'note', id: 'n1', fields: { body: 'Milk\nEggs\nBread', editedAt: NOW, editedBy: OTHER } }]);
+    expect(result.undo[0]!.fields).toEqual({ body: 'Milk\nEggs', editedAt: 3000, editedBy: ME });
+    const theirs = act(rows, updateNote, { id: 'theirs', title: 'Gifts' });
+    expect(note(theirs.rows, 'theirs')).toMatchObject({ title: 'Gifts', editedBy: ME, owner: OTHER });
+    expect(theirs.undo[0]!.fields).toEqual({ title: 'Gift ideas', editedAt: 3001, editedBy: OTHER });
+  });
+
+  test('a field that is not in the intent stays as it is', () => {
+    const { rows } = withNotes();
+    expect(note(act(rows, updateNote, { id: 'n1', body: 'x' }).rows, 'n1').title).toBe('Shopping');
+    expect(note(act(rows, updateNote, { id: 'n1', title: 'x' }).rows, 'n1').body).toBe('Milk\nEggs');
+    const both = act(rows, updateNote, { id: 'n1', title: 'T', body: 'B' });
+    expect(both.puts).toEqual([{ kind: 'note', id: 'n1', fields: { title: 'T', body: 'B', editedAt: NOW, editedBy: ME } }]);
+  });
+
+  test('the title and the body can become empty', () => {
+    const { rows } = withNotes();
+    const result = act(rows, updateNote, { id: 'n1', title: '', body: '' });
+    expect(note(result.rows, 'n1')).toMatchObject({ title: '', body: '', deleted: false });
+    expect(note(act(rows, updateNote, { id: 'n1', title: '' }).rows, 'n1').title).toBe('');
+  });
+
+  test('the time and the person of the edit go with each change of the text, also with the same values', () => {
+    const w = withNotes();
+    // The server merges each field by itself. If this put had no person, a body of the other
+    // person from the same moment would keep that person as the person of the edit.
+    w.note('mine', { body: 'x', editedAt: NOW, editedBy: ME });
+    const result = act(w.rows, updateNote, { id: 'mine', body: 'y' });
+    expect(result.puts).toEqual([{ kind: 'note', id: 'mine', fields: { body: 'y', editedAt: NOW, editedBy: ME } }]);
+    expect(result.undo).toEqual([{ kind: 'note', id: 'mine', fields: { body: 'x', editedAt: NOW, editedBy: ME } }]);
+    w.note('never', { body: 'x', editedAt: 0, editedBy: null });
+    expect(act(w.rows, updateNote, { id: 'never', body: 'y' }).undo[0]!.fields).toEqual({ body: 'x', editedAt: 0, editedBy: null });
+  });
+
+  test('no put and no change of the edit time when the text does not change', () => {
+    const { rows } = withNotes();
+    expect(act(rows, updateNote, { id: 'n1' }).puts).toEqual([]);
+    expect(act(rows, updateNote, { id: 'n1', title: 'Shopping' }).puts).toEqual([]);
+    expect(act(rows, updateNote, { id: 'n1', body: 'Milk\nEggs' }).puts).toEqual([]);
+    expect(act(rows, updateNote, { id: 'n1', title: 'Shopping', body: 'Milk\nEggs' }).puts).toEqual([]);
+    // Only the changed field is in the put.
+    expect(act(rows, updateNote, { id: 'n1', title: 'Shopping', body: 'Milk' }).puts[0]!.fields).toEqual({ body: 'Milk', editedAt: NOW, editedBy: ME });
+  });
+
+  test('the comparison is after the line-break rule and the cut', () => {
+    const w = withNotes();
+    w.note('two', { title: 'a b', body: 'y'.repeat(LIMITS.noteBody) });
+    expect(act(w.rows, updateNote, { id: 'two', title: 'a\nb' }).puts).toEqual([]);
+    expect(act(w.rows, updateNote, { id: 'two', title: 'a\r\n\nb' }).puts).toEqual([]);
+    expect(act(w.rows, updateNote, { id: 'two', body: 'y'.repeat(LIMITS.noteBody + 10) }).puts).toEqual([]);
+    expect(note(act(w.rows, updateNote, { id: 'two', title: 'a\nc' }).rows, 'two').title).toBe('a c');
+    const long = act(w.rows, updateNote, { id: 'n1', title: 'x'.repeat(LIMITS.noteTitle + 1), body: 'z'.repeat(LIMITS.noteBody + 1) });
+    expect(note(long.rows, 'n1').title).toHaveLength(LIMITS.noteTitle);
+    expect(note(long.rows, 'n1').body).toHaveLength(LIMITS.noteBody);
+    long.puts.forEach(expectServerAccepts);
+  });
+
+  test('the text is kept as typed', () => {
+    const { rows } = withNotes();
+    expect(note(act(rows, updateNote, { id: 'n1', title: ' Shopping ', body: '\n x \n' }).rows, 'n1')).toMatchObject({ title: ' Shopping ', body: '\n x \n' });
+  });
+
+  test('no put for a note that is deleted or not there', () => {
+    const w = withNotes();
+    w.note('dead', { deleted: true });
+    expect(act(w.rows, updateNote, { id: 'dead', title: 'x' }).puts).toEqual([]);
+    expect(act(w.rows, updateNote, { id: 'nope', title: 'x' }).puts).toEqual([]);
+    // A task with that id is not a note.
+    expect(act(w.rows, updateNote, { id: 'a', title: 'x' }).puts).toEqual([]);
+  });
+
+  test('the undo of each key of a typed text, in the opposite order, gives the start', () => {
+    const { rows: start } = withNotes();
+    let rows = start;
+    const undos: Put[][] = [];
+    let now = NOW;
+    for (const text of ['M', 'Mi', 'Mil', 'Milk', 'Milk\n', 'Milk\nB']) {
+      const result = act(rows, updateNote, { id: 'n1', body: text }, { now: (now += 1000) });
+      undos.push(result.undo);
+      rows = result.rows;
+    }
+    expect(note(rows, 'n1')).toMatchObject({ body: 'Milk\nB', editedAt: now });
+    const back = copy(rows);
+    for (const undo of undos.reverse()) applyPuts(back, undo);
+    expect(note(back, 'n1')).toEqual(note(start, 'n1'));
+  });
+});
+
+describe('setNoteColor', () => {
+  test('changes only the color: an edit time would be wrong, because the text did not change', () => {
+    const { rows } = withNotes();
+    const result = act(rows, setNoteColor, { id: 'n1', color: 'teal' });
+    expect(result.message).toBeNull();
+    expect(result.puts).toEqual([{ kind: 'note', id: 'n1', fields: { color: 'teal' } }]);
+    expect(result.undo).toEqual([{ kind: 'note', id: 'n1', fields: { color: 'default' } }]);
+    expect(act(rows, setNoteColor, { id: 'theirs', color: 'pink' }).puts).toHaveLength(1);
+  });
+
+  test('each color of the picker', () => {
+    const { rows } = withNotes();
+    for (const color of NOTE_COLORS.filter((each) => each !== 'default')) {
+      expect(note(act(rows, setNoteColor, { id: 'n1', color }).rows, 'n1').color).toBe(color);
+    }
+  });
+
+  test('no put for the same color, an unknown color, or a note that is not there', () => {
+    const w = withNotes();
+    w.note('dead', { deleted: true });
+    expect(act(w.rows, setNoteColor, { id: 'n1', color: 'default' }).puts).toEqual([]);
+    for (const color of ['coral', '', 'BLUE', 'toString'] as unknown as NoteColor[]) expect(act(w.rows, setNoteColor, { id: 'n1', color }).puts).toEqual([]);
+    expect(act(w.rows, setNoteColor, { id: 'dead', color: 'red' }).puts).toEqual([]);
+    expect(act(w.rows, setNoteColor, { id: 'nope', color: 'red' }).puts).toEqual([]);
+  });
+});
+
+describe('setNotePinned', () => {
+  test('a pin', () => {
+    const { rows } = withNotes();
+    const result = act(rows, setNotePinned, { id: 'n1', pinned: true });
+    expect(result).toMatchObject({
+      puts: [{ kind: 'note', id: 'n1', fields: { pinned: true, archived: false } }],
+      undo: [{ kind: 'note', id: 'n1', fields: { pinned: false, archived: false } }],
+      message: null,
+    });
+  });
+
+  test('a pin takes the note out of the archive, with a message', () => {
+    const w = withNotes();
+    w.note('old', { archived: true });
+    const result = act(w.rows, setNotePinned, { id: 'old', pinned: true });
+    expect(result.message).toBe('Note unarchived');
+    expect(result.puts).toEqual([{ kind: 'note', id: 'old', fields: { pinned: true, archived: false } }]);
+    expect(result.undo).toEqual([{ kind: 'note', id: 'old', fields: { pinned: false, archived: true } }]);
+  });
+
+  test('a note that sync made pinned and archived: the pin takes it out of the archive', () => {
+    const w = withNotes();
+    w.note('both', { archived: true, pinned: true });
+    const result = act(w.rows, setNotePinned, { id: 'both', pinned: true });
+    expect(result.puts).toEqual([{ kind: 'note', id: 'both', fields: { pinned: true, archived: false } }]);
+    expect(result.undo).toEqual([{ kind: 'note', id: 'both', fields: { pinned: true, archived: true } }]);
+    expect(result.message).toBe('Note unarchived');
+  });
+
+  test('a pin on one device and an archive on a different device never give a note that is pinned and archived', () => {
+    const w = withNotes();
+    for (const start of [{}, { pinned: true }, { archived: true }]) {
+      w.note('n', { pinned: false, archived: false, ...start });
+      const puts = [
+        ...act(w.rows, setNotePinned, { id: 'n', pinned: true }).puts,
+        ...act(w.rows, setNoteArchived, { id: 'n', archived: true }).puts,
+        ...act(w.rows, noteToTasks, { id: 'n', listId: 'l1', mode: 'one', archive: true }).puts.filter((put) => put.kind === 'note'),
+      ];
+      // The server keeps the newer value of each field. Each order of the ops is a possible order of their timestamps.
+      for (const first of puts) {
+        for (const second of puts) {
+          const server = copy(w.rows);
+          applyPuts(server, [first, second]);
+          const merged = note(server, 'n');
+          expect(merged.pinned && merged.archived, JSON.stringify({ start, first, second })).toBe(false);
+        }
+      }
+    }
+  });
+
+  test('an unpin does not change the archive', () => {
+    const w = withNotes();
+    w.note('pinned', { pinned: true });
+    w.note('old', { archived: true, pinned: true });
+    expect(act(w.rows, setNotePinned, { id: 'pinned', pinned: false })).toMatchObject({
+      puts: [{ kind: 'note', id: 'pinned', fields: { pinned: false } }],
+      message: null,
+    });
+    expect(act(w.rows, setNotePinned, { id: 'old', pinned: false }).puts).toEqual([{ kind: 'note', id: 'old', fields: { pinned: false } }]);
+  });
+
+  test('the undo of an unpin is a pin, so it also puts back archived', () => {
+    const w = withNotes();
+    w.note('pinned', { pinned: true });
+    w.note('both', { archived: true, pinned: true });
+    expect(act(w.rows, setNotePinned, { id: 'pinned', pinned: false }).undo).toEqual([{ kind: 'note', id: 'pinned', fields: { pinned: true, archived: false } }]);
+    // A note that sync made pinned and archived gets back the two values it had.
+    expect(act(w.rows, setNotePinned, { id: 'both', pinned: false }).undo).toEqual([{ kind: 'note', id: 'both', fields: { pinned: true, archived: true } }]);
+  });
+
+  test('a change on a different device between an action and its undo never gives a note that is pinned and archived', () => {
+    const w = withNotes();
+    for (const start of [{}, { pinned: true }, { archived: true }]) {
+      w.note('n', { pinned: false, archived: false, ...start });
+      const before = note(w.rows, 'n');
+      const results = [
+        act(w.rows, setNotePinned, { id: 'n', pinned: true }),
+        act(w.rows, setNotePinned, { id: 'n', pinned: false }),
+        act(w.rows, setNoteArchived, { id: 'n', archived: true }),
+        act(w.rows, setNoteArchived, { id: 'n', archived: false }),
+        act(w.rows, noteToTasks, { id: 'n', listId: 'l1', mode: 'one', archive: true }),
+      ].map(({ puts, undo }) => ({ puts: puts.filter((put) => put.kind === 'note'), undo: undo.filter((put) => put.kind === 'note') }));
+      for (const action of results) {
+        if (action.puts.length === 0) continue;
+        for (const other of results) {
+          // The server keeps the newer value of each field. The undo is newer than its action.
+          for (const order of [
+            [action.puts, other.puts, action.undo],
+            [other.puts, action.puts, action.undo],
+            [action.puts, action.undo, other.puts],
+          ]) {
+            const server = copy(w.rows);
+            applyPuts(server, order.flat());
+            const merged = note(server, 'n');
+            const context = JSON.stringify({ start, order });
+            expect(merged.pinned && merged.archived, context).toBe(false);
+            // An undo that comes last puts the note back where it was.
+            if (order[2] === action.undo) {
+              expect({ pinned: merged.pinned, archived: merged.archived }, context).toEqual({ pinned: before.pinned, archived: before.archived });
+            }
+          }
+        }
+      }
+    }
+  });
+
+  test('each person who can see the note can pin it, for that person', () => {
+    const { rows } = withNotes();
+    expect(note(act(rows, setNotePinned, { id: 'theirs', pinned: true }).rows, 'theirs').pinned).toBe(true);
+  });
+
+  test('no put when nothing changes, or for a note that is not there', () => {
+    const w = withNotes();
+    w.note('pinned', { pinned: true });
+    w.note('dead', { deleted: true });
+    expect(act(w.rows, setNotePinned, { id: 'pinned', pinned: true })).toMatchObject({ puts: [], message: null });
+    expect(act(w.rows, setNotePinned, { id: 'n1', pinned: false })).toMatchObject({ puts: [], message: null });
+    expect(act(w.rows, setNotePinned, { id: 'dead', pinned: true }).puts).toEqual([]);
+    expect(act(w.rows, setNotePinned, { id: 'nope', pinned: true }).puts).toEqual([]);
+  });
+});
+
+describe('setNoteArchived', () => {
+  test('an archive also takes away the pin, and the undo puts back the two', () => {
+    const w = withNotes();
+    w.note('pinned', { pinned: true });
+    const result = act(w.rows, setNoteArchived, { id: 'pinned', archived: true });
+    expect(result.message).toBe('Note archived');
+    expect(result.puts).toEqual([{ kind: 'note', id: 'pinned', fields: { archived: true, pinned: false } }]);
+    expect(result.undo).toEqual([{ kind: 'note', id: 'pinned', fields: { archived: false, pinned: true } }]);
+    expect(act(w.rows, setNoteArchived, { id: 'n1', archived: true }).puts).toEqual([{ kind: 'note', id: 'n1', fields: { archived: true, pinned: false } }]);
+  });
+
+  test('an unarchive', () => {
+    const w = withNotes();
+    w.note('old', { archived: true });
+    const result = act(w.rows, setNoteArchived, { id: 'old', archived: false });
+    expect(result).toMatchObject({ puts: [{ kind: 'note', id: 'old', fields: { archived: false } }], message: 'Note unarchived' });
+    expect(note(result.rows, 'old').pinned).toBe(false);
+  });
+
+  test('the undo of an unarchive is an archive, so it also puts back pinned', () => {
+    const w = withNotes();
+    w.note('old', { archived: true });
+    w.note('both', { archived: true, pinned: true });
+    expect(act(w.rows, setNoteArchived, { id: 'old', archived: false }).undo).toEqual([{ kind: 'note', id: 'old', fields: { archived: true, pinned: false } }]);
+    expect(act(w.rows, setNoteArchived, { id: 'both', archived: false }).undo).toEqual([{ kind: 'note', id: 'both', fields: { archived: true, pinned: true } }]);
+  });
+
+  test('an unarchive sends only archived, so a pin of a different device at the same time stays', () => {
+    const w = withNotes();
+    w.note('old', { archived: true });
+    expect(act(w.rows, setNoteArchived, { id: 'old', archived: false }).puts).toEqual([{ kind: 'note', id: 'old', fields: { archived: false } }]);
+  });
+
+  test('each person who can see the note can archive it, for that person', () => {
+    const { rows } = withNotes();
+    expect(act(rows, setNoteArchived, { id: 'theirs', archived: true }).message).toBe('Note archived');
+  });
+
+  test('no put and no message when nothing changes, or for a note that is not there', () => {
+    const w = withNotes();
+    w.note('old', { archived: true });
+    w.note('dead', { deleted: true });
+    expect(act(w.rows, setNoteArchived, { id: 'old', archived: true })).toMatchObject({ puts: [], message: null });
+    expect(act(w.rows, setNoteArchived, { id: 'n1', archived: false })).toMatchObject({ puts: [], message: null });
+    expect(act(w.rows, setNoteArchived, { id: 'dead', archived: true })).toMatchObject({ puts: [], message: null });
+    expect(act(w.rows, setNoteArchived, { id: 'nope', archived: true })).toMatchObject({ puts: [], message: null });
+  });
+});
+
+describe('setNoteShared', () => {
+  test('the owner shares the note and stops the sharing, with no message', () => {
+    const w = withNotes();
+    const shared = act(w.rows, setNoteShared, { id: 'n1', shared: true });
+    expect(shared).toMatchObject({
+      puts: [{ kind: 'note', id: 'n1', fields: { shared: true } }],
+      undo: [{ kind: 'note', id: 'n1', fields: { shared: false } }],
+      message: null,
+    });
+    const stopped = act(shared.rows, setNoteShared, { id: 'n1', shared: false });
+    expect(stopped.puts).toEqual([{ kind: 'note', id: 'n1', fields: { shared: false } }]);
+  });
+
+  test('only the owner', () => {
+    const { rows } = withNotes();
+    expect(act(rows, setNoteShared, { id: 'theirs', shared: false }).puts).toEqual([]);
+    expect(act(rows, setNoteShared, { id: 'n1', shared: true }, { me: OTHER }).puts).toEqual([]);
+    // The owner can do it from each device.
+    expect(act(rows, setNoteShared, { id: 'theirs', shared: false }, { me: OTHER }).puts).toHaveLength(1);
+  });
+
+  test('no put when nothing changes, or for a note that is not there', () => {
+    const w = withNotes();
+    w.note('dead', { deleted: true });
+    expect(act(w.rows, setNoteShared, { id: 'n1', shared: false }).puts).toEqual([]);
+    expect(act(w.rows, setNoteShared, { id: 'dead', shared: true }).puts).toEqual([]);
+    expect(act(w.rows, setNoteShared, { id: 'nope', shared: true }).puts).toEqual([]);
+  });
+});
+
+describe('deleteNote', () => {
+  test('sets deleted, with a message and an undo with all fields', () => {
+    const w = withNotes();
+    w.note('full', { color: 'red', shared: true, pinned: true, body: 'x', editedBy: OTHER });
+    const result = act(w.rows, deleteNote, { id: 'full' });
+    expect(result.message).toBe('Note deleted');
+    expect(result.puts).toEqual([{ kind: 'note', id: 'full', fields: { deleted: true } }]);
+    expect(result.undo).toHaveLength(1);
+    const { id: _, ...all } = note(w.rows, 'full');
+    expect(result.undo[0]).toEqual({ kind: 'note', id: 'full', fields: all });
+    [...result.puts, ...result.undo].forEach(expectServerAccepts);
+  });
+
+  test('the undo makes the note again after a sync dropped it, because it has the creation time', () => {
+    const w = withNotes();
+    const result = act(w.rows, deleteNote, { id: 'n1' });
+    const dropped = copy(result.rows);
+    dropped.notes.delete('n1');
+    applyPuts(dropped, result.undo);
+    expect(note(dropped, 'n1')).toEqual(note(w.rows, 'n1'));
+  });
+
+  test('only the owner', () => {
+    const { rows } = withNotes();
+    expect(act(rows, deleteNote, { id: 'theirs' })).toMatchObject({ puts: [], undo: [], message: null });
+    expect(act(rows, deleteNote, { id: 'theirs', discard: true })).toMatchObject({ puts: [], undo: [], message: null });
+    expect(act(rows, deleteNote, { id: 'n1' }, { me: OTHER })).toMatchObject({ puts: [], undo: [], message: null });
+    expect(act(rows, deleteNote, { id: 'theirs' }, { me: OTHER }).puts).toHaveLength(1);
+  });
+
+  test('discard: no message and no undo, so the empty note cannot come back', () => {
+    const w = withNotes();
+    w.note('empty', { title: '', body: '' });
+    const { rows, ...result } = act(w.rows, deleteNote, { id: 'empty', discard: true });
+    expect(result).toEqual({ puts: [{ kind: 'note', id: 'empty', fields: { deleted: true } }], undo: [], message: null });
+    expect(note(rows, 'empty').deleted).toBe(true);
+    // discard: false is a normal delete.
+    expect(act(w.rows, deleteNote, { id: 'empty', discard: false }).message).toBe('Note deleted');
+  });
+
+  test('no put for a note that is deleted or not there', () => {
+    const w = withNotes();
+    w.note('dead', { deleted: true });
+    for (const id of ['dead', 'nope', 'a', 'l1']) {
+      expect(act(w.rows, deleteNote, { id })).toMatchObject({ puts: [], undo: [], message: null });
+      expect(act(w.rows, deleteNote, { id, discard: true })).toMatchObject({ puts: [], undo: [], message: null });
+    }
+  });
+});
+
+describe('noteToTasks', () => {
+  const groceries = '  - [ ] Milk\n- [x] Eggs\n1) Bread\n\n12. Jam\n• Tea\n+ Rice\n[] Salt\n   \n* Butter';
+
+  test("'lines': a task for each line, at the top of the list in the order of the body", () => {
+    const w = withNotes();
+    w.note('g', { title: 'Groceries', body: groceries });
+    const result = act(w.rows, noteToTasks, { id: 'g', listId: 'l1', mode: 'lines' });
+    expect(result.message).toBe('7 tasks added to Groceries');
+    // The title of the note is a heading, so it gives no task.
+    expect(shownTitles(result.rows)).toEqual(['Milk', 'Bread', 'Jam', 'Tea', 'Rice', 'Salt', 'Butter', 'a', 'b', '  b1', '  b2', 'c']);
+    // The puts of the new tasks are first, in the order of the body.
+    expect(result.puts.map((put) => (put.fields as Partial<TaskRow>).title)).toEqual(['Milk', 'Bread', 'Jam', 'Tea', 'Rice', 'Salt', 'Butter']);
+    expect(result.undo.every((put) => put.kind === 'task' && sameFields(put.fields, { deleted: true }))).toBe(true);
+    result.puts.forEach(expectServerAccepts);
+  });
+
+  test('each task is a full row like createTask makes: no date, made now by this person', () => {
+    const w = withNotes();
+    w.note('g', { body: 'Milk\nBread' });
+    const result = act(w.rows, noteToTasks, { id: 'g', listId: 'l2', mode: 'lines' }, { me: OTHER });
+    const keys = new Set<string>();
+    for (const put of result.puts) {
+      expect(put.kind).toBe('task');
+      expect(Object.keys(put.fields).sort()).toEqual(TASK_FIELDS);
+      const made = task(result.rows, put.id);
+      expect(made).toEqual({
+        ...defaultTask(put.id),
+        listId: 'l2',
+        title: made.title,
+        pos: made.pos,
+        createdAt: NOW,
+        createdBy: OTHER,
+      });
+      keys.add(made.pos);
+    }
+    expect(keys.size).toBe(2);
+    expect(shownTitles(result.rows, 'l2')).toEqual(['Milk', 'Bread']);
+    expect(result.message).toBe('2 tasks added to l2');
+  });
+
+  test('the tasks go before the first task, also before a completed task or tasks with the same key', () => {
+    const w = withNotes();
+    w.task('done', { pos: 'Zz', completed: true, completedAt: 5, completedBy: ME });
+    w.task('twin1', { listId: 'l2', pos: 'a5' });
+    w.task('twin2', { listId: 'l2', pos: 'a5' });
+    w.note('g', { body: 'One\nTwo\nThree' });
+    const result = act(w.rows, noteToTasks, { id: 'g', listId: 'l1', mode: 'lines' });
+    const firstKey = (rows: Rows, listId: ID): string => [...rows.tasks.values()].filter((t) => t.listId === listId && !t.deleted && t.parentId === null).sort(comparePos)[0]!.id;
+    expect(task(result.rows, firstKey(result.rows, 'l1')).title).toBe('One');
+    expect(shownTitles(result.rows)).toEqual(['One', 'Two', 'Three', 'a', 'b', '  b1', '  b2', 'c']);
+    const twins = act(w.rows, noteToTasks, { id: 'g', listId: 'l2', mode: 'lines' });
+    expect(shownTitles(twins.rows, 'l2')).toEqual(['One', 'Two', 'Three', 'twin1', 'twin2']);
+  });
+
+  test('a list with no task', () => {
+    const w = withNotes();
+    w.list('empty');
+    w.note('g', { body: 'One\nTwo' });
+    const result = act(w.rows, noteToTasks, { id: 'g', listId: 'empty', mode: 'lines' });
+    expect(shownTitles(result.rows, 'empty')).toEqual(['One', 'Two']);
+  });
+
+  test("'one': the trimmed title, with the body as the details", () => {
+    const w = withNotes();
+    w.note('g', { title: '  Groceries ', body: 'Milk\n\nEggs ' });
+    const result = act(w.rows, noteToTasks, { id: 'g', listId: 'l1', mode: 'one' });
+    expect(result.message).toBe('Task added to Groceries');
+    expect(result.puts).toHaveLength(1);
+    expect(task(result.rows, result.puts[0]!.id)).toMatchObject({ title: 'Groceries', notes: 'Milk\n\nEggs ', parentId: null });
+    expect(shownTitles(result.rows)).toEqual(['Groceries', 'a', 'b', '  b1', '  b2', 'c']);
+  });
+
+  test("'one' with no title: the first line with text is the title, and the lines after it are the details", () => {
+    const w = withNotes();
+    w.note('g', { title: '', body: '\n   \n  Call mum  \nabout Sunday\n\nand the cake' });
+    w.note('spaces', { title: '   ', body: 'First\r\nSecond' });
+    w.note('line', { title: '', body: 'Only line' });
+    const result = act(w.rows, noteToTasks, { id: 'g', listId: 'l1', mode: 'one' });
+    expect(task(result.rows, result.puts[0]!.id)).toMatchObject({ title: 'Call mum', notes: 'about Sunday\n\nand the cake' });
+    const spaces = act(w.rows, noteToTasks, { id: 'spaces', listId: 'l1', mode: 'one' });
+    expect(task(spaces.rows, spaces.puts[0]!.id)).toMatchObject({ title: 'First', notes: 'Second' });
+    const line = act(w.rows, noteToTasks, { id: 'line', listId: 'l1', mode: 'one' });
+    expect(task(line.rows, line.puts[0]!.id)).toMatchObject({ title: 'Only line', notes: '' });
+  });
+
+  test("'lines' with one line gives the message for one task", () => {
+    const w = withNotes();
+    w.note('g', { title: 'Heading', body: '- [x] Done\n- Milk' });
+    const result = act(w.rows, noteToTasks, { id: 'g', listId: 'l1', mode: 'lines' });
+    expect(result.message).toBe('Task added to Groceries');
+    expect(shownTitles(result.rows)[0]).toBe('Milk');
+  });
+
+  test('no puts when no task has a title', () => {
+    const w = withNotes();
+    w.note('empty', { title: '', body: '' });
+    w.note('blank', { title: '  ', body: ' \n\t\n' });
+    w.note('checked', { title: 'Done', body: '- [x] Milk\n[X] Eggs\n\n- [ ]' });
+    for (const id of ['empty', 'blank']) {
+      for (const mode of ['one', 'lines'] as const) expect(act(w.rows, noteToTasks, { id, listId: 'l1', mode })).toMatchObject({ puts: [], undo: [], message: null });
+    }
+    expect(act(w.rows, noteToTasks, { id: 'checked', listId: 'l1', mode: 'lines' })).toMatchObject({ puts: [], message: null });
+    // A title with no body gives no line, but one task.
+    expect(act(w.rows, noteToTasks, { id: 'checked', listId: 'l1', mode: 'one' }).puts).toHaveLength(1);
+    expect(act(w.rows, noteToTasks, { id: 'n1', listId: 'l1', mode: 'other' as 'one' }).puts).toEqual([]);
+  });
+
+  test('no puts when the note or the list is not there', () => {
+    const w = withNotes();
+    w.note('dead', { deleted: true, body: 'x' });
+    w.list('gone', { deleted: true });
+    for (const mode of ['one', 'lines'] as const) {
+      expect(act(w.rows, noteToTasks, { id: 'dead', listId: 'l1', mode }).puts).toEqual([]);
+      expect(act(w.rows, noteToTasks, { id: 'nope', listId: 'l1', mode }).puts).toEqual([]);
+      expect(act(w.rows, noteToTasks, { id: 'n1', listId: 'gone', mode }).puts).toEqual([]);
+      expect(act(w.rows, noteToTasks, { id: 'n1', listId: 'nope', mode }).puts).toEqual([]);
+      expect(act(w.rows, noteToTasks, { id: 'n1', listId: 'gone', mode, archive: true }).puts).toEqual([]);
+    }
+  });
+
+  test('at most LIMITS.noteTasks tasks, the first lines of the body', () => {
+    const w = withNotes();
+    const lines = Array.from({ length: LIMITS.noteTasks + 50 }, (_, i) => `Item ${i + 1}`);
+    w.note('long', { body: lines.join('\n') });
+    const result = act(w.rows, noteToTasks, { id: 'long', listId: 'l1', mode: 'lines' });
+    expect(result.puts).toHaveLength(LIMITS.noteTasks);
+    expect(result.message).toBe(`${LIMITS.noteTasks} tasks added to Groceries`);
+    expect(shownTitles(result.rows)).toEqual([...lines.slice(0, LIMITS.noteTasks), 'a', 'b', '  b1', '  b2', 'c']);
+    for (const put of result.puts) expect((put.fields as Partial<TaskRow>).pos!.length).toBeLessThanOrEqual(40);
+    result.puts.forEach(expectServerAccepts);
+  });
+
+  test('the titles and the details are cut to the limits of a task', () => {
+    const w = withNotes();
+    w.note('long', { title: '', body: 'x'.repeat(LIMITS.title + 10) + '\n' + 'y'.repeat(LIMITS.noteBody) });
+    const lines = act(w.rows, noteToTasks, { id: 'long', listId: 'l1', mode: 'lines' });
+    expect(lines.puts.map((put) => (put.fields as Partial<TaskRow>).title)).toEqual(['x'.repeat(LIMITS.title), 'y'.repeat(LIMITS.title)]);
+    const one = act(w.rows, noteToTasks, { id: 'long', listId: 'l1', mode: 'one' });
+    expect(task(one.rows, one.puts[0]!.id)).toMatchObject({ title: 'x'.repeat(LIMITS.title), notes: 'y'.repeat(LIMITS.notes) });
+    w.note('titled', { title: 'Plan', body: '😀'.repeat(LIMITS.notes) });
+    const titled = act(w.rows, noteToTasks, { id: 'titled', listId: 'l1', mode: 'one' });
+    expect(task(titled.rows, titled.puts[0]!.id).notes).toBe('😀'.repeat(LIMITS.notes / 2));
+    for (const result of [lines, one, titled]) result.puts.forEach(expectServerAccepts);
+  });
+
+  test('archive: true archives the note for this person as setNoteArchived does, and the undo puts it back', () => {
+    const w = withNotes();
+    w.note('g', { body: 'Milk\nBread', pinned: true });
+    const result = act(w.rows, noteToTasks, { id: 'g', listId: 'l1', mode: 'lines', archive: true });
+    expect(note(result.rows, 'g')).toMatchObject({ archived: true, pinned: false, deleted: false });
+    expect(result.message).toBe('2 tasks added to Groceries');
+    const notePut = result.puts.find((put) => put.kind === 'note');
+    expect(notePut).toEqual({ kind: 'note', id: 'g', fields: { archived: true, pinned: false } });
+    expect(result.undo.find((put) => put.kind === 'note')).toEqual({ kind: 'note', id: 'g', fields: { archived: false, pinned: true } });
+    // The puts of the new rows are first.
+    expect(result.puts.at(-1)).toBe(notePut);
+
+    const back = copy(result.rows);
+    applyPuts(back, result.undo);
+    expect(note(back, 'g')).toEqual(note(w.rows, 'g'));
+    expect(shown(back)).toEqual(shown(w.rows));
+  });
+
+  test('archive: true on a shared note of the other person, and on a note in the archive', () => {
+    const w = withNotes();
+    w.note('old', { body: 'Milk', archived: true });
+    const theirs = act(w.rows, noteToTasks, { id: 'theirs', listId: 'l1', mode: 'one', archive: true });
+    expect(note(theirs.rows, 'theirs').archived).toBe(true);
+    const old = act(w.rows, noteToTasks, { id: 'old', listId: 'l1', mode: 'lines', archive: true });
+    expect(old.puts.map((put) => put.kind)).toEqual(['task']);
+    // Without archive, the note stays as it is.
+    expect(act(w.rows, noteToTasks, { id: 'n1', listId: 'l1', mode: 'lines' }).puts.every((put) => put.kind === 'task')).toBe(true);
+  });
+
+  test("the number of tasks is the N of the dialog, and 'one' gives a task exactly when the note has text", () => {
+    const bodies = ['', ' \n ', 'a', '- [x] a\n- [ ] b\n\n3) c', groceries, Array.from({ length: 230 }, (_, i) => `[ ] ${i}`).join('\r\n'), '[x] done', '-\n*\n• '];
+    for (const body of bodies) {
+      for (const title of ['', '  ', 'Title']) {
+        const w = withNotes();
+        w.note('g', { title, body });
+        const lines = act(w.rows, noteToTasks, { id: 'g', listId: 'l1', mode: 'lines' });
+        expect(lines.puts.length, JSON.stringify(body)).toBe(Math.min(noteTaskTitles(body).length, LIMITS.noteTasks));
+        const one = act(w.rows, noteToTasks, { id: 'g', listId: 'l1', mode: 'one' });
+        expect(one.puts.length, JSON.stringify([title, body])).toBe(title.trim() || body.trim() ? 1 : 0);
+      }
+    }
+  });
+
+  test('the undo deletes the tasks and puts back the old keys of the list', () => {
+    const w = world();
+    w.list('l1', { title: 'Groceries' });
+    // Keys at the start of the key space: the new keys need new keys for the old tasks too.
+    w.rows.tasks.set('x', freeze({ ...defaultTask('x'), listId: 'l1', title: 'x', pos: 'A' + '0'.repeat(45) }));
+    w.rows.tasks.set('y', freeze({ ...defaultTask('y'), listId: 'l1', title: 'y', pos: 'A' + '0'.repeat(45) + '1' }));
+    w.note('g', { body: 'One\nTwo' });
+    const result = act(w.rows, noteToTasks, { id: 'g', listId: 'l1', mode: 'lines' });
+    expect(shownTitles(result.rows)).toEqual(['One', 'Two', 'x', 'y']);
+    expect(result.puts.filter((put) => put.id === 'x' || put.id === 'y').map((put) => Object.keys(put.fields))).toEqual([['pos'], ['pos']]);
+    const back = copy(result.rows);
+    applyPuts(back, result.undo);
+    expect(task(back, 'x')).toEqual(task(w.rows, 'x'));
+    expect(task(back, 'y')).toEqual(task(w.rows, 'y'));
+    expect([...back.tasks.values()].filter((t) => !t.deleted).map((t) => t.id).sort()).toEqual(['x', 'y']);
+  });
+});
+
+/** true if the fields are the same, in any key order. */
+function sameFields(a: object, b: object): boolean {
+  return JSON.stringify(Object.entries(a).sort()) === JSON.stringify(Object.entries(b).sort());
+}
+
 describe('many random actions', () => {
   function random(seed: number): () => number {
     let s = seed >>> 0;
@@ -1543,11 +2308,15 @@ describe('many random actions', () => {
     const pick = <T>(items: readonly T[]): T => items[Math.floor(next() * items.length)]!;
     const w = standard();
     w.list('l3', { pos: null });
+    w.note('n1', { body: '- Milk\n- [x] Eggs\n- Bread' });
+    w.note('n2', { owner: OTHER, shared: true, title: '', body: 'Call\nabout it' });
     let rows = w.rows;
     let made = 0;
     let today = TODAY;
     const anyTask = (): ID => (next() < 0.03 ? 'nope' : pick([...rows.tasks.keys()]));
     const anyList = (): ID => (next() < 0.03 ? 'nope' : pick([...rows.lists.keys()]));
+    const anyNote = (): ID => (next() < 0.03 ? 'nope' : pick([...rows.notes.keys()]));
+    const anyone = (): ID => (next() < 0.3 ? OTHER : ME);
     const maybe = <T>(value: T): T | undefined => (next() < 0.5 ? value : undefined);
     const rules: RepeatRule[] = [
       DAILY,
@@ -1574,13 +2343,25 @@ describe('many random actions', () => {
       () => act(rows, createList, { title: 'list', id: `list${made++}` }, { today }),
       () => act(rows, moveList, { id: anyList(), beforeId: maybe(anyList()), afterId: maybe(anyList()), toFirst: next() < 0.2 }, { today }),
       () => act(rows, clearCompleted, { listId: anyList() }, { today }),
+      () => act(rows, createNote, { id: `note${made++}`, title: pick(['', ' ', 'Title', 'two\nlines']), body: pick(['', 'Milk\nBread', '1. one\n2. two']), color: pick(['red', 'coral', undefined] as unknown as (NoteColor | undefined)[]), pinned: next() < 0.3, shared: next() < 0.3 }, { today, me: anyone() }),
+      () => act(rows, updateNote, { id: anyNote(), title: maybe(pick(['', 'New', 'a\r\nb'])), body: maybe(pick(['', '- a\n- b', 'text'])) }, { today, me: anyone() }),
+      () => act(rows, setNoteColor, { id: anyNote(), color: pick(['default', 'teal', 'coral'] as unknown as NoteColor[]) }, { today }),
+      () => act(rows, setNotePinned, { id: anyNote(), pinned: next() < 0.5 }, { today }),
+      () => act(rows, setNoteArchived, { id: anyNote(), archived: next() < 0.5 }, { today }),
+      () => act(rows, setNoteShared, { id: anyNote(), shared: next() < 0.5 }, { today, me: anyone() }),
+      () => act(rows, deleteNote, { id: anyNote(), discard: next() < 0.3 }, { today, me: anyone() }),
+      () => act(rows, noteToTasks, { id: anyNote(), listId: anyList(), mode: pick(['one', 'lines'] as const), archive: next() < 0.5 }, { today }),
     ];
 
     let changed = 0;
+    let noteChanges = 0;
+    let tasksFromNotes = 0;
     for (let i = 0; i < 1500; i++) {
       if (i % 200 === 199) today = today < '2026-10-12' ? `2026-10-${String(+today.slice(8) + 1).padStart(2, '0')}` : today;
       const result = pick(steps)();
       if (result.puts.length) changed++;
+      if (result.puts.some((put) => put.kind === 'note')) noteChanges++;
+      if (result.message?.includes(' added to ')) tasksFromNotes++;
       rows = result.rows;
 
       for (const each of rows.tasks.values()) {
@@ -1593,8 +2374,20 @@ describe('many random actions', () => {
         if (each.time !== null && each.due === null) throw new Error(`step ${i}: ${each.id} has a time and no date`);
         if (each.repeat !== null && each.due === null) throw new Error(`step ${i}: ${each.id} repeats and has no date`);
       }
+      for (const each of rows.notes.values()) {
+        if (each.deleted) continue;
+        // A pin takes the note out of the archive, and an archive takes away the pin.
+        if (each.pinned && each.archived) throw new Error(`step ${i}: the note ${each.id} is pinned and archived`);
+        if (/[\r\n]/.test(each.title)) throw new Error(`step ${i}: the title of the note ${each.id} has a line break`);
+        if (each.title.length > LIMITS.noteTitle || each.body.length > LIMITS.noteBody) throw new Error(`step ${i}: the note ${each.id} is too long`);
+        if (!NOTE_COLORS.includes(each.color)) throw new Error(`step ${i}: the note ${each.id} has the color ${each.color}`);
+        if (each.owner !== ME && each.owner !== OTHER) throw new Error(`step ${i}: the note ${each.id} has no owner`);
+      }
     }
     expect(changed).toBeGreaterThan(300);
+    expect(noteChanges).toBeGreaterThan(100);
+    expect(tasksFromNotes).toBeGreaterThan(10);
+    expect([...rows.notes.values()].filter((each) => each.deleted).length).toBeGreaterThan(0);
 
     // Each task that is not deleted shows one time, or is hidden below a resting parent.
     for (const each of rows.lists.values()) {
@@ -1637,7 +2430,21 @@ function expectServerAccepts(put: Put): void {
   const text = (max: number) => (v: unknown): boolean => typeof v === 'string' && v.length <= max && (v as unknown as { isWellFormed(): boolean }).isWellFormed();
   const pos = (v: unknown): boolean => typeof v === 'string' && v.length <= 1024;
   const checks: Record<string, (v: unknown) => boolean> =
-    put.kind === 'task'
+    put.kind === 'note'
+      ? {
+          title: text(LIMITS.noteTitle),
+          body: text(LIMITS.noteBody),
+          color: (v) => (NOTE_COLORS as readonly unknown[]).includes(v),
+          shared: bool,
+          editedAt: stamp,
+          editedBy: orNull(id),
+          deleted: bool,
+          owner: id,
+          createdAt: stamp,
+          pinned: bool,
+          archived: bool,
+        }
+      : put.kind === 'task'
       ? {
           listId: id,
           parentId: orNull(id),
@@ -2138,12 +2945,17 @@ describe('the undo of many actions in the opposite order', () => {
     w.task('rep', { repeat: { ...DAILY, end: { type: 'after', count: 3 } }, due: TODAY });
     w.task('rep1', { parentId: 'rep' });
     w.task('x', { listId: 'l2' });
+    w.note('n1', { body: '- Milk\n- Bread', pinned: true });
+    w.note('n2', { owner: OTHER, shared: true, color: 'blue', archived: true, editedBy: OTHER });
+    w.note('n3', { title: '', body: '  Call mum \nabout Sunday' });
     const start = w.rows;
     let rows = start;
     let made = 0;
     const undos: Put[][] = [];
     const anyTask = (): ID => pick([...rows.tasks.keys()]);
     const anyList = (): ID => pick([...rows.lists.keys()]);
+    const anyNote = (): ID => pick([...rows.notes.keys()]);
+    const anyone = (): ID => (next() < 0.3 ? OTHER : ME);
     const maybe = <T>(value: T): T | undefined => (next() < 0.5 ? value : undefined);
     const steps: (() => ActionResult & { rows: Rows })[] = [
       () => act(rows, createTask, { listId: anyList(), title: `n${made} 😀`, id: `n${made++}`, position: pick([{ at: 'top' as const }, { after: anyTask() }, { parentId: anyTask(), at: 'end' as const }]), repeat: maybe(DAILY), due: maybe('2026-10-09'), time: maybe('08:15') }),
@@ -2167,6 +2979,15 @@ describe('the undo of many actions in the opposite order', () => {
       () => act(rows, moveList, { id: anyList(), beforeId: maybe(anyList()), afterId: maybe(anyList()), toFirst: next() < 0.2 }),
       () => act(rows, deleteList, { id: anyList() }),
       () => act(rows, clearCompleted, { listId: anyList() }),
+      () => act(rows, createNote, { id: `note${made++}`, title: pick(['', 'Title 😀']), body: pick(['x', '- a\n- b']), color: pick(['pink', 'nope'] as unknown as NoteColor[]), pinned: next() < 0.3 }, { me: anyone() }),
+      () => act(rows, updateNote, { id: anyNote(), title: maybe(pick(['', 'New\ntitle'])), body: maybe(pick(['', 'y'.repeat(LIMITS.noteBody + 5)])) }, { me: anyone(), now: NOW + made++ }),
+      () => act(rows, setNoteColor, { id: anyNote(), color: pick(['default', 'gray'] as NoteColor[]) }),
+      () => act(rows, setNotePinned, { id: anyNote(), pinned: next() < 0.5 }),
+      () => act(rows, setNoteArchived, { id: anyNote(), archived: next() < 0.5 }),
+      () => act(rows, setNoteShared, { id: anyNote(), shared: next() < 0.5 }, { me: anyone() }),
+      // A discard has no undo, so it is not in this test.
+      () => act(rows, deleteNote, { id: anyNote() }, { me: anyone() }),
+      () => act(rows, noteToTasks, { id: anyNote(), listId: anyList(), mode: pick(['one', 'lines'] as const), archive: next() < 0.5 }),
     ];
     for (let i = 0; i < 600; i++) {
       const result = pick(steps)();
@@ -2179,9 +3000,11 @@ describe('the undo of many actions in the opposite order', () => {
     for (const undo of undos.reverse()) applyPuts(back, undo);
     for (const [id, row] of start.tasks) expect(back.tasks.get(id), id).toEqual(row);
     for (const [id, row] of start.lists) expect(back.lists.get(id), id).toEqual(row);
+    for (const [id, row] of start.notes) expect(back.notes.get(id), id).toEqual(row);
     // Each row that an action made is deleted again.
     for (const [id, row] of back.tasks) if (!start.tasks.has(id)) expect(row.deleted, id).toBe(true);
     for (const [id, row] of back.lists) if (!start.lists.has(id)) expect(row.deleted, id).toBe(true);
+    for (const [id, row] of back.notes) if (!start.notes.has(id)) expect(row.deleted, id).toBe(true);
   });
 });
 
@@ -2210,6 +3033,15 @@ describe('each action with ids that are not there', () => {
         act(state, moveList, { id: 'nope', toFirst: true }),
         act(state, deleteList, { id: 'nope' }),
         act(state, clearCompleted, { listId: 'nope' }),
+        act(state, updateNote, { id: 'nope', title: 'x', body: 'y' }),
+        act(state, setNoteColor, { id: 'nope', color: 'red' }),
+        act(state, setNotePinned, { id: 'nope', pinned: true }),
+        act(state, setNoteArchived, { id: 'nope', archived: true }),
+        act(state, setNoteShared, { id: 'nope', shared: true }),
+        act(state, deleteNote, { id: 'nope' }),
+        act(state, deleteNote, { id: 'nope', discard: true }),
+        act(state, noteToTasks, { id: 'nope', listId: 'l1', mode: 'lines' }),
+        act(state, noteToTasks, { id: 'nope', listId: 'nope', mode: 'one', archive: true }),
       ];
       for (const result of results) expect(result).toMatchObject({ puts: [], undo: [], message: null });
     }
@@ -2271,5 +3103,34 @@ describe('setRepeat from a dialog that the person opens again', () => {
     const tuesdays = act(w.rows, setRepeat, { id: 'r', rule: { ...weekly, weekdays: [2] } });
     expect(task(tuesdays.rows, 'r')).toMatchObject({ due: TODAY, hiddenUntil: TODAY });
     expect(isOpen({ task: task(tuesdays.rows, 'r'), today: TODAY })).toBe(true);
+  });
+});
+
+describe('review: the undo of an unpin or an unarchive', () => {
+  // setNotePinned: "A pin also sets archived to false". setNoteArchived: "An archive also sets
+  // pinned to false". The undo of an unpin is a pin again, and the undo of an unarchive is an
+  // archive again, so each must carry the other field too. Else a change on a different device of
+  // the same person, between the action and its undo, gives a note that is pinned and archived.
+  test('an unpin, an archive on a different device, then the undo of the unpin: the note is not pinned and archived', () => {
+    const w = withNotes();
+    w.note('n', { pinned: true, archived: false });
+    const unpin = act(w.rows, setNotePinned, { id: 'n', pinned: false });
+    const archive = act(w.rows, setNoteArchived, { id: 'n', archived: true });
+    // The server keeps the newer value of each field. The undo comes last, because the person pressed it last.
+    const server = copy(w.rows);
+    applyPuts(server, [...unpin.puts, ...archive.puts, ...unpin.undo]);
+    const merged = note(server, 'n');
+    expect(merged.pinned && merged.archived, JSON.stringify(merged)).toBe(false);
+  });
+
+  test('an unarchive, a pin on a different device, then the undo of the unarchive: the note is not pinned and archived', () => {
+    const w = withNotes();
+    w.note('n', { pinned: false, archived: true });
+    const unarchive = act(w.rows, setNoteArchived, { id: 'n', archived: false });
+    const pin = act(w.rows, setNotePinned, { id: 'n', pinned: true });
+    const server = copy(w.rows);
+    applyPuts(server, [...unarchive.puts, ...pin.puts, ...unarchive.undo]);
+    const merged = note(server, 'n');
+    expect(merged.pinned && merged.archived, JSON.stringify(merged)).toBe(false);
   });
 });

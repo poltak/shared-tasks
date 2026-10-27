@@ -4,6 +4,9 @@ import type {
   ID,
   ListFields,
   ListRow,
+  NoteColor,
+  NoteFields,
+  NoteRow,
   Put,
   RepeatRule,
   SortMode,
@@ -12,14 +15,14 @@ import type {
   TaskRow,
   TimeStr,
 } from './types.ts';
-import { LIMITS } from './types.ts';
+import { LIMITS, NOTE_COLORS } from './types.ts';
 import type { Rows } from './merge.ts';
-import { defaultList, defaultTask, sameValue } from './merge.ts';
+import { defaultList, defaultNote, defaultTask, sameValue } from './merge.ts';
 import { keysBetween } from './fracindex.ts';
 import { newId } from './ids.ts';
 import { addDays, formatDate, isValidDate, isValidTime } from './dates.ts';
 import { firstOccurrence, isFinished, nextOccurrence, validateRule } from './recurrence.ts';
-import { comparePos, isOpen, isParentOf, isResting, orderLists } from './view.ts';
+import { comparePos, isOpen, isParentOf, isResting, noteTaskTitles, orderLists } from './view.ts';
 
 // Each action reads the rows and gives the puts that make the change, and the puts that undo it.
 // An action that is not possible gives no puts. No action changes the rows: the caller applies
@@ -139,6 +142,60 @@ export interface ClearCompletedIntent {
   listId: ID;
 }
 
+export interface CreateNoteIntent {
+  /** The id of the new note. Without it, the action makes one: it is the id of the put. */
+  id?: ID;
+  title?: string;
+  body?: string;
+  /** A color that is not in NOTE_COLORS gives 'default'. */
+  color?: NoteColor;
+  pinned?: boolean;
+  shared?: boolean;
+}
+
+/** A field that is not in the intent stays as it is. */
+export interface UpdateNoteIntent {
+  id: ID;
+  title?: string;
+  body?: string;
+}
+
+export interface SetNoteColorIntent {
+  id: ID;
+  color: NoteColor;
+}
+
+export interface SetNotePinnedIntent {
+  id: ID;
+  pinned: boolean;
+}
+
+export interface SetNoteArchivedIntent {
+  id: ID;
+  archived: boolean;
+}
+
+export interface SetNoteSharedIntent {
+  id: ID;
+  shared: boolean;
+}
+
+export interface DeleteNoteIntent {
+  id: ID;
+  /** For a note that the editor made and the person emptied again: no message and no undo. */
+  discard?: boolean;
+}
+
+export interface NoteToTasksIntent {
+  /** The note. */
+  id: ID;
+  listId: ID;
+  /** 'one': one task for the note. 'lines': one task for each line of the body. */
+  mode: 'one' | 'lines';
+  /** Also archives the note for this person. */
+  archive?: boolean;
+}
+
 // ---- Collecting the puts of one action ----
 
 function nothing(): ActionResult {
@@ -150,8 +207,11 @@ class Batch {
   rows: Rows;
   lists = new Map<ID, ListFields>();
   tasks = new Map<ID, TaskFields>();
+  notes = new Map<ID, NoteFields>();
   /** The ids of the rows that the action makes. */
   made = new Set<ID>();
+  /** For each row ('note:ID'), the fields that a put has all together or not at all. */
+  together = new Map<string, Set<string>>();
 
   constructor(rows: Rows) {
     this.rows = rows;
@@ -165,6 +225,21 @@ class Batch {
     this.lists.set(id, { ...this.lists.get(id), ...fields });
   }
 
+  note(id: ID, fields: NoteFields): void {
+    this.notes.set(id, { ...this.notes.get(id), ...fields });
+  }
+
+  /**
+   * A change of fields that must arrive at the server as one, also the fields that have that value
+   * on this device already. The server merges each field by itself. So a pin on one device
+   * ({ pinned: true }) and an archive on a different device ({ archived: true }) would give a note
+   * that is pinned and archived.
+   */
+  noteTogether(id: ID, fields: NoteFields): void {
+    this.note(id, fields);
+    this.together.set(`note:${id}`, new Set([...(this.together.get(`note:${id}`) ?? []), ...Object.keys(fields)]));
+  }
+
   makeTask({ id, ...fields }: TaskRow): void {
     this.made.add(id);
     this.tasks.set(id, fields);
@@ -173,6 +248,11 @@ class Batch {
   makeList({ id, ...fields }: ListRow): void {
     this.made.add(id);
     this.lists.set(id, fields);
+  }
+
+  makeNote({ id, ...fields }: NoteRow): void {
+    this.made.add(id);
+    this.notes.set(id, fields);
   }
 
   /**
@@ -193,6 +273,7 @@ class Batch {
     const kinds = [
       { kind: 'list', changes: this.lists, rows: this.rows.lists },
       { kind: 'task', changes: this.tasks, rows: this.rows.tasks },
+      { kind: 'note', changes: this.notes, rows: this.rows.notes },
     ] as const;
     for (const made of [true, false]) {
       for (const { kind, changes, rows } of kinds) {
@@ -213,6 +294,19 @@ class Batch {
             before[key] = old[key];
           }
           if (Object.keys(next).length === 0) continue;
+          for (const key of this.together.get(`${kind}:${id}`) ?? []) {
+            if (key in next) continue;
+            next[key] = (fields as Record<string, unknown>)[key];
+            before[key] = old[key];
+          }
+          if (kind === 'note' && ('pinned' in before || 'archived' in before)) {
+            // The undo of an unpin is a pin, and the undo of an unarchive is an archive. Like the
+            // actions, each must have the other field too (see noteTogether). The unpin itself
+            // sends only { pinned: false }: an archive that a different device made at the same
+            // time must stay.
+            before.pinned = old.pinned;
+            before.archived = old.archived;
+          }
           if (next.deleted === true) {
             // The device drops a deleted row after the next sync. The undo then makes the row
             // again, so it has all fields.
@@ -238,6 +332,11 @@ function liveTask(rows: Rows, id: ID | null | undefined): TaskRow | undefined {
 function liveList(rows: Rows, id: ID | null | undefined): ListRow | undefined {
   const list = id == null ? undefined : rows.lists.get(id);
   return list && !list.deleted ? list : undefined;
+}
+
+function liveNote(rows: Rows, id: ID | null | undefined): NoteRow | undefined {
+  const note = id == null ? undefined : rows.notes.get(id);
+  return note && !note.deleted ? note : undefined;
 }
 
 /** The parent that the task shows below, or null for a task that shows at the top level. */
@@ -801,4 +900,190 @@ export function clearCompleted(ctx: ActionContext, intent: ClearCompletedIntent)
     count++;
   }
   return batch.finish(count === 1 ? '1 completed task deleted' : `${count} completed tasks deleted`);
+}
+
+// ---- Notes ----
+
+/** The title of a note is one line. A pasted text can have line breaks, so each run becomes a space. */
+function noteTitle(text: string): string {
+  return cut(text.replace(/[\r\n]+/g, ' '), LIMITS.noteTitle);
+}
+
+const isNoteColor = (color: unknown): color is NoteColor => (NOTE_COLORS as readonly unknown[]).includes(color);
+
+/**
+ * No note if the title and the body are both empty after trim, or if a row with that id is there.
+ * The text is not trimmed: the editor makes the note at the first key, and a trim would take away
+ * the space that the person typed before it.
+ */
+export function createNote(ctx: ActionContext, intent: CreateNoteIntent): ActionResult {
+  const { rows } = ctx;
+  const title = noteTitle(intent.title ?? '');
+  const body = cut(intent.body ?? '', LIMITS.noteBody);
+  const id = intent.id ?? newId();
+  if ((!title.trim() && !body.trim()) || rows.notes.has(id)) return nothing();
+  const batch = new Batch(rows);
+  batch.makeNote({
+    ...defaultNote(id),
+    title,
+    body,
+    color: isNoteColor(intent.color) ? intent.color : 'default',
+    shared: intent.shared === true,
+    editedAt: ctx.now,
+    editedBy: ctx.me,
+    owner: ctx.me,
+    createdAt: ctx.now,
+    pinned: intent.pinned === true,
+    archived: false,
+  });
+  return batch.finish();
+}
+
+/** The title and the body can become empty. Only a real change of the text sets the time and the person of the edit. */
+export function updateNote(ctx: ActionContext, intent: UpdateNoteIntent): ActionResult {
+  const note = liveNote(ctx.rows, intent.id);
+  if (!note) return nothing();
+  const fields: NoteFields = {};
+  const before: NoteFields = {};
+  const title = intent.title === undefined ? note.title : noteTitle(intent.title);
+  const body = intent.body === undefined ? note.body : cut(intent.body, LIMITS.noteBody);
+  if (title !== note.title) {
+    fields.title = title;
+    before.title = note.title;
+  }
+  if (body !== note.body) {
+    fields.body = body;
+    before.body = note.body;
+  }
+  if (fields.title === undefined && fields.body === undefined) return nothing();
+  // Not a Batch, which drops a value that does not change. The server merges each field by
+  // itself, so the person and the time must go with each text. Else an edit of the other person
+  // at the same time can put that name on this text.
+  return {
+    puts: [{ kind: 'note', id: note.id, fields: { ...fields, editedAt: ctx.now, editedBy: ctx.me } }],
+    undo: [{ kind: 'note', id: note.id, fields: { ...before, editedAt: note.editedAt, editedBy: note.editedBy } }],
+    message: null,
+  };
+}
+
+/**
+ * A change of the fields of one note. `fields` gives null when the change is not permitted. The
+ * fields of the change go out together: a pin with its { archived: false } is one decision.
+ */
+function changeNote({
+  ctx,
+  id,
+  fields,
+  message = null,
+}: {
+  ctx: ActionContext;
+  id: ID;
+  fields: (note: NoteRow) => NoteFields | null;
+  message?: string | null | ((note: NoteRow) => string | null);
+}): ActionResult {
+  const note = liveNote(ctx.rows, id);
+  const change = note && fields(note);
+  if (!note || !change) return nothing();
+  const batch = new Batch(ctx.rows);
+  batch.noteTogether(note.id, change);
+  return batch.finish(typeof message === 'function' ? message(note) : message);
+}
+
+/** The server refuses an op with an unknown color, and with it the text changes that the outbox merged into that op. */
+export function setNoteColor(ctx: ActionContext, intent: SetNoteColorIntent): ActionResult {
+  return changeNote({ ctx, id: intent.id, fields: () => (isNoteColor(intent.color) ? { color: intent.color } : null) });
+}
+
+/** A pin also takes the note out of the archive, as in Google Keep. */
+export function setNotePinned(ctx: ActionContext, intent: SetNotePinnedIntent): ActionResult {
+  const pinned = intent.pinned === true;
+  return changeNote({
+    ctx,
+    id: intent.id,
+    fields: () => (pinned ? { pinned, archived: false } : { pinned }),
+    message: (note) => (pinned && note.archived ? 'Note unarchived' : null),
+  });
+}
+
+/** An archive also takes away the pin. */
+export function setNoteArchived(ctx: ActionContext, intent: SetNoteArchivedIntent): ActionResult {
+  const archived = intent.archived === true;
+  return changeNote({
+    ctx,
+    id: intent.id,
+    fields: () => (archived ? { archived, pinned: false } : { archived }),
+    message: archived ? 'Note archived' : 'Note unarchived',
+  });
+}
+
+/** Only the owner can share a note or stop the sharing. The screen gives the message, because only it knows the name. */
+export function setNoteShared(ctx: ActionContext, intent: SetNoteSharedIntent): ActionResult {
+  return changeNote({
+    ctx,
+    id: intent.id,
+    fields: (note) => (note.owner === ctx.me ? { shared: intent.shared === true } : null),
+  });
+}
+
+/**
+ * Only the owner can delete a note. `discard` is for a note that the editor made and that the
+ * person emptied again: the person sees no message, and no undo can bring back the empty note.
+ */
+export function deleteNote(ctx: ActionContext, intent: DeleteNoteIntent): ActionResult {
+  const result = changeNote({
+    ctx,
+    id: intent.id,
+    fields: (note) => (note.owner === ctx.me ? { deleted: true } : null),
+    message: intent.discard ? null : 'Note deleted',
+  });
+  return intent.discard ? { ...result, undo: [] } : result;
+}
+
+/** The title and the details of each task that a note gives, in order, before the limits. */
+function tasksOfNote(note: NoteRow, mode: NoteToTasksIntent['mode']): { title: string; notes: string }[] {
+  if (mode === 'lines') return noteTaskTitles(note.body).map((title) => ({ title, notes: '' }));
+  if (mode !== 'one') return [];
+  const title = note.title.trim();
+  if (title) return [{ title, notes: note.body }];
+  const lines = note.body.split(/\r\n|\r|\n/);
+  const first = lines.findIndex((line) => line.trim() !== '');
+  return first < 0 ? [] : [{ title: lines[first]!.trim(), notes: lines.slice(first + 1).join('\n') }];
+}
+
+/**
+ * Makes tasks from a note, at the top of the list in their order. 'lines' gives one task for each
+ * line of the body: the title of the note is a heading such as "Groceries", so it gives no task.
+ * 'one' gives one task with the note title, or with the first line of a note with no title.
+ */
+export function noteToTasks(ctx: ActionContext, intent: NoteToTasksIntent): ActionResult {
+  const { rows } = ctx;
+  const note = liveNote(rows, intent.id);
+  const list = liveList(rows, intent.listId);
+  if (!note || !list) return nothing();
+  const made = tasksOfNote(note, intent.mode)
+    .slice(0, LIMITS.noteTasks)
+    .map((task) => ({ title: cut(task.title, LIMITS.title), notes: cut(task.notes, LIMITS.notes) }));
+  if (made.length === 0) return nothing();
+
+  const batch = new Batch(rows);
+  // All keys come from one call: one call for each task would give each task the same key.
+  const keys = place({
+    items: siblingsOf({ rows, listId: list.id, parentId: null }),
+    index: 0,
+    count: made.length,
+    rekey: (taskId, key) => batch.task(taskId, { pos: key }),
+  });
+  made.forEach((task, i) => {
+    batch.makeTask({
+      ...defaultTask(newId()),
+      listId: list.id,
+      title: task.title,
+      notes: task.notes,
+      pos: keys[i]!,
+      createdAt: ctx.now,
+      createdBy: ctx.me,
+    });
+  });
+  if (intent.archive === true) batch.noteTogether(note.id, { archived: true, pinned: false });
+  return batch.finish(made.length === 1 ? `Task added to ${list.title}` : `${made.length} tasks added to ${list.title}`);
 }

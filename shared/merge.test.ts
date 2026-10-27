@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import type { ListRow, Put, RepeatRule, TaskRow } from './types.ts';
-import { applyPut, applyPuts, defaultList, defaultTask, emptyRows } from './merge.ts';
+import type { ListRow, NoteRow, Put, RepeatRule, TaskRow } from './types.ts';
+import { applyPut, applyPuts, defaultList, defaultNote, defaultTask, emptyRows } from './merge.ts';
 
 const rule: RepeatRule = { every: 1, unit: 'day', start: '2026-10-06', end: { type: 'never' } };
 
@@ -10,8 +10,10 @@ describe('defaults', () => {
     const b = emptyRows();
     expect(a.lists.size).toBe(0);
     expect(a.tasks.size).toBe(0);
+    expect(a.notes.size).toBe(0);
     expect(a.lists).not.toBe(b.lists);
     expect(a.tasks).not.toBe(b.tasks);
+    expect(a.notes).not.toBe(b.notes);
   });
 
   test('defaultList has each field of a list', () => {
@@ -31,6 +33,15 @@ describe('defaults', () => {
       starred: false, starredAt: null,
     };
     expect(defaultTask('t1')).toEqual(expected);
+  });
+
+  test('defaultNote has each field of a note', () => {
+    const expected: NoteRow = {
+      id: 'n1', title: '', body: '', color: 'default', shared: false, editedAt: 0, editedBy: null, deleted: false,
+      owner: '', createdAt: 0, pinned: false, archived: false,
+    };
+    expect(defaultNote('n1')).toEqual(expected);
+    expect(defaultNote('n1')).not.toBe(defaultNote('n1'));
   });
 });
 
@@ -172,5 +183,84 @@ describe('applyPuts', () => {
     const rows = emptyRows();
     applyPuts(rows, []);
     expect(rows.tasks.size + rows.lists.size).toBe(0);
+  });
+});
+
+describe('applyPut for a note', () => {
+  const made = { title: 'Ideas', body: 'One\nTwo', owner: 'u1', createdAt: 5, editedAt: 5, editedBy: 'u1' };
+
+  test('makes a note from the default row and the fields when the put has the creation time', () => {
+    const rows = emptyRows();
+    const row = applyPut(rows, { kind: 'note', id: 'n1', fields: made });
+    expect(row).toEqual({ ...defaultNote('n1'), ...made });
+    expect(rows.notes.get('n1')).toBe(row);
+    expect(rows.lists.size + rows.tasks.size).toBe(0);
+    expect(applyPut(rows, { kind: 'note', id: 'n2', fields: { createdAt: 7 } })).toEqual({ ...defaultNote('n2'), createdAt: 7 });
+    // An empty title is a title like the others.
+    expect(applyPut(rows, { kind: 'note', id: 'n3', fields: { title: '', body: 'x', createdAt: 8 } })?.title).toBe('');
+  });
+
+  test('a put with no creation time makes no note: a late key in the editor for a note that the device dropped', () => {
+    const rows = emptyRows();
+    const late: Put[] = [
+      { kind: 'note', id: 'n1', fields: { title: '' } },
+      { kind: 'note', id: 'n1', fields: { title: 'Milk', editedAt: 9, editedBy: 'u2' } },
+      { kind: 'note', id: 'n1', fields: { body: 'x' } },
+      { kind: 'note', id: 'n1', fields: { pinned: true, archived: false } },
+      { kind: 'note', id: 'n1', fields: { color: 'red' } },
+      { kind: 'note', id: 'n1', fields: { deleted: true } },
+      { kind: 'note', id: 'n1', fields: { shared: false } },
+      { kind: 'note', id: 'n1', fields: { createdAt: undefined, title: 'x' } },
+      // A put with all other fields, as an undo of a change of many fields can be.
+      { kind: 'note', id: 'n1', fields: { title: 'a', body: 'b', color: 'red', shared: true, editedAt: 1, editedBy: 'u1', deleted: false, owner: 'u1', pinned: true, archived: false } },
+    ];
+    for (const put of late) expect(applyPut(rows, put)).toBeNull();
+    applyPuts(rows, late);
+    expect(rows.notes.size).toBe(0);
+    // The same puts change a note that is there.
+    applyPut(rows, { kind: 'note', id: 'n1', fields: made });
+    expect(applyPut(rows, { kind: 'note', id: 'n1', fields: { title: 'late' } })).toMatchObject({ title: 'late', body: 'One\nTwo' });
+  });
+
+  test('the undo of a delete makes the note again after the device dropped it, because it has all fields', () => {
+    const rows = emptyRows();
+    const { id: _, ...all } = { ...defaultNote('n1'), ...made, color: 'teal' as const, shared: true, pinned: true };
+    expect(applyPut(rows, { kind: 'note', id: 'n1', fields: all })).toEqual({ id: 'n1', ...all });
+  });
+
+  test('a change gives a new object, and a put that changes no value keeps the object', () => {
+    const rows = emptyRows();
+    const first = applyPut(rows, { kind: 'note', id: 'n1', fields: made })!;
+    const copy = structuredClone(first);
+    const second = applyPut(rows, { kind: 'note', id: 'n1', fields: { color: 'yellow', archived: true } })!;
+    expect(second).not.toBe(first);
+    expect(first).toEqual(copy);
+    expect(second).toEqual({ ...copy, color: 'yellow', archived: true });
+    expect(applyPut(rows, { kind: 'note', id: 'n1', fields: { color: 'yellow', title: 'Ideas', editedBy: 'u1' } })).toBe(second);
+  });
+
+  test('ignores undefined values, the id, and unknown fields', () => {
+    const rows = emptyRows();
+    const first = applyPut(rows, { kind: 'note', id: 'n1', fields: made })!;
+    const fields = { title: undefined, id: 'other', pos: 'a0', listId: 'l1' } as unknown as Put['fields'];
+    expect(applyPut(rows, { kind: 'note', id: 'n1', fields } as Put)).toBe(first);
+    expect('pos' in first).toBe(false);
+    expect(rows.notes.has('other')).toBe(false);
+    expect(rows.tasks.size).toBe(0);
+  });
+
+  test('a list, a task, and a note can have the same id', () => {
+    const rows = emptyRows();
+    applyPuts(rows, [
+      { kind: 'list', id: 'x', fields: { title: 'List' } },
+      { kind: 'task', id: 'x', fields: { listId: 'x', title: 'Task' } },
+      { kind: 'note', id: 'x', fields: { title: 'Note', createdAt: 1 } },
+    ]);
+    expect(rows.lists.get('x')?.title).toBe('List');
+    expect(rows.tasks.get('x')?.title).toBe('Task');
+    expect(rows.notes.get('x')?.title).toBe('Note');
+    // A put of a task with the field that makes a note is not a note.
+    expect(applyPut(rows, { kind: 'task', id: 'y', fields: { createdAt: 1 } })).toBeNull();
+    expect(applyPut(rows, { kind: 'note', id: 'y', fields: { listId: 'x' } as never })).toBeNull();
   });
 });

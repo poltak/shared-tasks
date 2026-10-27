@@ -11,6 +11,7 @@ import {
   daysInMonth,
   deadlineChipText,
   diffDays,
+  editedText,
   formatDate,
   fromDayNumber,
   fromJsDate,
@@ -224,6 +225,15 @@ describe.each(['Asia/Ho_Chi_Minh', 'America/Los_Angeles', 'Europe/Berlin', 'Paci
       expect(todayOf(lateEvening)).toBe('2026-10-05');
       expect(completedText({ at: lateEvening.getTime(), locale })).toBe('Completed: Mon 5 Oct');
       expect(completedText({ at: new Date(2026, 9, 6, 0, 30).getTime(), locale })).toBe('Completed: Tue 6 Oct');
+    });
+
+    test('editedText uses the local date and time', () => {
+      const lateEvening = new Date(2026, 9, 5, 23, 30).getTime();
+      expect(editedText({ at: lateEvening, today: '2026-10-05', locale })).toBe('Edited 23:30');
+      expect(editedText({ at: lateEvening, today: '2026-10-06', locale })).toBe('Edited yesterday');
+      expect(editedText({ at: lateEvening, today: '2026-10-07', locale })).toBe('Edited Mon 5 Oct');
+      expect(editedText({ at: new Date(2026, 9, 6, 0, 30).getTime(), today: '2026-10-06', locale })).toBe('Edited 00:30');
+      expect(editedText({ at: new Date(2025, 11, 31, 23, 59).getTime(), today: '2026-01-02', locale })).toBe('Edited 31 Dec 2025');
     });
   },
 );
@@ -464,6 +474,59 @@ describe('completedText', () => {
     expect(completedText({ at, locale })).toBe('Completed: Wed 31 Dec');
     expect(completedText({ at, today: '2025-12-31', locale })).toBe('Completed: Wed 31 Dec');
     expect(completedText({ at, today: '2026-10-06', locale })).toBe('Completed: Wed 31 Dec 2025');
+  });
+});
+
+describe('editedText', () => {
+  const at = (month: number, day: number, hour = 12, minute = 0, year = 2026): number => new Date(year, month - 1, day, hour, minute).getTime();
+
+  test('today: the time, in the 24-hour form of the locale', () => {
+    expect(editedText({ at: at(10, 6, 14, 30), today, locale })).toBe('Edited 14:30');
+    expect(editedText({ at: at(10, 6, 0, 5), today, locale })).toBe('Edited 00:05');
+    expect(editedText({ at: at(10, 6, 23, 59), today, locale })).toBe('Edited 23:59');
+    expect(editedText({ at: at(10, 6, 9, 7) + 59_999, today, locale })).toBe('Edited 09:07');
+  });
+
+  test('today: the time, in the 12-hour form of the locale', () => {
+    const us = (time: number): string => editedText({ at: time, today, locale: 'en-US' });
+    expect(us(at(10, 6, 14, 30))).toBe('Edited 2:30 PM');
+    expect(us(at(10, 6, 0, 5))).toBe('Edited 12:05 AM');
+    expect(us(at(10, 6, 12, 0))).toBe('Edited 12:00 PM');
+    expect(us(at(10, 6, 9, 15))).toBe('Edited 9:15 AM');
+  });
+
+  test('yesterday', () => {
+    expect(editedText({ at: at(10, 5, 0, 0), today, locale })).toBe('Edited yesterday');
+    expect(editedText({ at: at(10, 5, 23, 59), today, locale })).toBe('Edited yesterday');
+    expect(editedText({ at: at(10, 5, 8, 0), today, locale: 'en-US' })).toBe('Edited yesterday');
+    // Also when yesterday is in a different year.
+    expect(editedText({ at: at(12, 31, 22, 0), today: '2027-01-01', locale })).toBe('Edited yesterday');
+  });
+
+  test('a different day of this year: the weekday and the date', () => {
+    expect(editedText({ at: at(10, 4), today, locale })).toBe('Edited Sun 4 Oct');
+    expect(editedText({ at: at(1, 1, 0, 0), today, locale })).toBe('Edited Thu 1 Jan');
+    expect(editedText({ at: at(10, 5), today: '2026-10-12', locale })).toBe('Edited Mon 5 Oct');
+    expect(editedText({ at: at(10, 5), today: '2026-10-12', locale: 'en-US' })).toBe('Edited Mon 5 Oct');
+  });
+
+  test('a different year: the date and the year, with no weekday', () => {
+    expect(editedText({ at: at(10, 5, 12, 0, 2025), today, locale })).toBe('Edited 5 Oct 2025');
+    expect(editedText({ at: at(10, 5, 12, 0, 2025), today, locale: 'en-US' })).toBe('Edited 5 Oct 2025');
+    expect(editedText({ at: at(12, 30, 12, 0), today: '2027-01-01', locale })).toBe('Edited 30 Dec 2026');
+    expect(editedText({ at: at(2, 29, 12, 0, 2024), today, locale })).toBe('Edited 29 Feb 2024');
+  });
+
+  test('a time after today, from a clock that is fast, shows its date', () => {
+    expect(editedText({ at: at(10, 7, 0, 10), today, locale })).toBe('Edited Wed 7 Oct');
+    expect(editedText({ at: at(1, 2, 0, 10, 2027), today: '2026-12-31', locale })).toBe('Edited 2 Jan 2027');
+  });
+
+  test('a language that writes a month as a number uses its own date form', () => {
+    expect(editedText({ at: at(10, 7), today, locale: 'ja-JP' })).toBe('Edited 10月7日(水)');
+    expect(editedText({ at: at(10, 5, 12, 0, 2025), today, locale: 'ja-JP' })).toBe('Edited 2025年10月5日');
+    expect(editedText({ at: at(10, 5, 12, 0, 2025), today, locale: 'zh-CN' })).toBe('Edited 2025年10月5日');
+    expect(editedText({ at: at(10, 5, 12, 0, 2025), today, locale: 'vi-VN' })).toBe('Edited 5 thg 10 2025');
   });
 });
 
@@ -773,6 +836,11 @@ describe('date text in other languages', () => {
       }
       expect(timeText({ time: '00:05', locale: tag })).toMatch(/^(00:05|12:05 \S+)$/);
       expect(timeText({ time: '23:59', locale: tag })).toMatch(/^(23:59|11:59 \S+)$/);
+      for (const at of [new Date(2026, 9, 6, 0, 5), new Date(2026, 9, 5, 12, 0), new Date(2026, 1, 1), new Date(2024, 1, 29)]) {
+        const text = editedText({ at: at.getTime(), today, locale: tag });
+        expect(text).toMatch(/^Edited \S/);
+        expect(text).not.toMatch(/undefined|NaN/);
+      }
       expect(monthTitle({ year: 2026, month: 10, locale: tag }).length).toBeGreaterThan(3);
       expect([0, 1, 6]).toContain(weekStartOf(tag));
     }

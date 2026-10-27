@@ -1,13 +1,14 @@
-import type { ID, ListRow, Put, TaskRow } from './types.ts';
+import type { ID, ListRow, NoteRow, Put, TaskRow } from './types.ts';
 
 /** All rows that a device has. The maps change in place. A row object never changes. */
 export interface Rows {
   lists: Map<ID, ListRow>;
   tasks: Map<ID, TaskRow>;
+  notes: Map<ID, NoteRow>;
 }
 
 export function emptyRows(): Rows {
-  return { lists: new Map(), tasks: new Map() };
+  return { lists: new Map(), tasks: new Map(), notes: new Map() };
 }
 
 export function defaultList(id: ID): ListRow {
@@ -52,6 +53,23 @@ export function defaultTask(id: ID): TaskRow {
   };
 }
 
+export function defaultNote(id: ID): NoteRow {
+  return {
+    id,
+    title: '',
+    body: '',
+    color: 'default',
+    shared: false,
+    editedAt: 0,
+    editedBy: null,
+    deleted: false,
+    owner: '',
+    createdAt: 0,
+    pinned: false,
+    archived: false,
+  };
+}
+
 /**
  * true if two field values are equal. A repeat rule is the only value that is an object. The
  * server writes its keys in a different order than a device does, so the key order is ignored.
@@ -87,18 +105,27 @@ function merge<Row extends { id: ID }>(map: Map<ID, Row>, base: Row, fields: obj
  * changes no value keeps the old object.
  *
  * A row that is not there starts from the default row, but only if the put can make a row: it has
- * the title of a list, or the list of a task. Each put that makes a row has these, and the server
- * has the same rule. A different put for a row that is not there is a late change to a row that
- * the device dropped (an undo, or an op that waits in the outbox). It gives null and makes no
- * row, because that row would be an empty list or a task in no list that never goes away.
+ * the title of a list, the list of a task, or the creation time of a note. Each put that makes a
+ * row has these, and the server has the same rule. A different put for a row that is not there is
+ * a late change to a row that the device dropped (an undo, or an op that waits in the outbox). It
+ * gives null and makes no row, because that row would be an empty list, a task in no list, or an
+ * empty note that never goes away.
+ *
+ * A note cannot use its title as the mark: each key in the editor sends the title, and it can be
+ * empty.
  */
 export function applyPut(rows: Rows, put: Extract<Put, { kind: 'list' }>): ListRow | null;
 export function applyPut(rows: Rows, put: Extract<Put, { kind: 'task' }>): TaskRow | null;
-export function applyPut(rows: Rows, put: Put): ListRow | TaskRow | null;
-export function applyPut(rows: Rows, put: Put): ListRow | TaskRow | null {
+export function applyPut(rows: Rows, put: Extract<Put, { kind: 'note' }>): NoteRow | null;
+export function applyPut(rows: Rows, put: Put): ListRow | TaskRow | NoteRow | null;
+export function applyPut(rows: Rows, put: Put): ListRow | TaskRow | NoteRow | null {
   if (put.kind === 'list') {
     const base = rows.lists.get(put.id) ?? (put.fields.title === undefined ? null : defaultList(put.id));
     return base && merge(rows.lists, base, put.fields);
+  }
+  if (put.kind === 'note') {
+    const base = rows.notes.get(put.id) ?? (put.fields.createdAt === undefined ? null : defaultNote(put.id));
+    return base && merge(rows.notes, base, put.fields);
   }
   const base = rows.tasks.get(put.id) ?? (put.fields.listId === undefined ? null : defaultTask(put.id));
   return base && merge(rows.tasks, base, put.fields);

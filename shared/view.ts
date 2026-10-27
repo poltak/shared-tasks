@@ -1,4 +1,16 @@
-import type { DateStr, ID, ListRow, ListView, SortMode, StarredSort, TaskRow, ViewGroup, ViewItem } from './types.ts';
+import type {
+  DateStr,
+  ID,
+  ListRow,
+  ListView,
+  NoteRow,
+  NotesView,
+  SortMode,
+  StarredSort,
+  TaskRow,
+  ViewGroup,
+  ViewItem,
+} from './types.ts';
 import { groupHeading } from './dates.ts';
 
 /** The task repeats and waits in "Completed" for its next date. */
@@ -264,4 +276,91 @@ export function buildStarredView({
       ? dateGroups({ tasks: starred, field: 'due', today, locale, children, rank })
       : oneGroup(starred.sort(byStar(rank)).map((task) => ({ task, depth: 0, hasChildren: children.has(task.id) })));
   return { groups, completed: [], openCount: starred.length };
+}
+
+// ---- Notes ----
+
+/** Newest note first, then by id. An edit does not move a note, so a card stays where the person saw it. */
+export function compareNotes(a: NoteRow, b: NoteRow): number {
+  return b.createdAt - a.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+/** `toLocaleLowerCase` throws for a locale tag that is not valid. */
+function lowerCaser(locale: string): (text: string) => string {
+  try {
+    'a'.toLocaleLowerCase(locale);
+    return (text) => text.toLocaleLowerCase(locale);
+  } catch {
+    return (text) => text.toLowerCase();
+  }
+}
+
+/** Text with no accents and no capitals, for a search that ignores both. */
+function searchForm(text: string, lower: (text: string) => string): string {
+  return lower(text.normalize('NFD').replace(/\p{M}/gu, ''));
+}
+
+// A search runs again at each key, and a note body can be long, so the search form of each note is
+// kept. The check of the title and the body keeps it correct also for an object that changed.
+const searchTexts = new WeakMap<NoteRow, { locale: string; title: string; body: string; text: string }>();
+
+function searchTextOf(note: NoteRow, locale: string, lower: (text: string) => string): string {
+  let found = searchTexts.get(note);
+  if (!found || found.locale !== locale || found.title !== note.title || found.body !== note.body) {
+    // A line break cannot be part of a word of the query, so no word matches across the two fields.
+    const text = searchForm(note.title + '\n' + note.body, lower);
+    found = { locale, title: note.title, body: note.body, text };
+    searchTexts.set(note, found);
+  }
+  return found.text;
+}
+
+/**
+ * What the notes screen shows. `archived: false` gives the pinned notes and the other notes that
+ * are not archived. `archived: true` gives all archived notes in `others`. With a query, a note
+ * stays only if each word of the query is in its title or its body.
+ */
+export function buildNotesView({
+  notes,
+  archived,
+  query,
+  locale,
+}: {
+  notes: Iterable<NoteRow>;
+  archived: boolean;
+  query: string;
+  locale: string;
+}): NotesView {
+  const lower = lowerCaser(locale);
+  const words = query.trim() ? searchForm(query, lower).split(/\s+/).filter(Boolean) : [];
+  const view: NotesView = { pinned: [], others: [] };
+  for (const note of notes) {
+    if (note.deleted || note.archived !== archived) continue;
+    if (words.length) {
+      const text = searchTextOf(note, locale, lower);
+      if (!words.every((word) => text.includes(word))) continue;
+    }
+    // The actions send pinned and archived together, but the server takes each valid op, so a row
+    // can have the two. The archive is the stronger state.
+    (note.pinned && !archived ? view.pinned : view.others).push(note);
+  }
+  view.pinned.sort(compareNotes);
+  view.others.sort(compareNotes);
+  return view;
+}
+
+/**
+ * The task titles that "Make tasks" gives for each line of a note body, in order, before any
+ * limit. A list that the person typed or pasted has markers ("- ", "1. ", "[ ] "), and these are
+ * not part of the title. A line that is checked ("[x]") is done, so it gives no task.
+ */
+export function noteTaskTitles(body: string): string[] {
+  const titles: string[] = [];
+  for (const line of body.split(/\r\n|\r|\n/)) {
+    let title = line.trim().replace(/^(?:[-*•+] |\d+[.)] )/, '').trim();
+    if (/^\[[xX]\]/.test(title)) continue;
+    title = title.replace(/^\[ ?\]/, '').trim();
+    if (title) titles.push(title);
+  }
+  return titles;
 }
