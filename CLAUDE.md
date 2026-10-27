@@ -58,20 +58,41 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 <!-- END BEADS INTEGRATION -->
 
 
-## Build & Test
+## Running bd
 
-_Add your build and test commands here_
+`bd` is a dev dependency of this repository, not a global command. Run it through pnpm:
 
 ```bash
-# Example:
-# npm install
-# npm test
+pnpm bd ready
+pnpm bd show st-abc123
 ```
+
+The git hooks and the session hook call `bd` by name. They do nothing until `bd` is on the PATH.
+
+## Build & Test
+
+| Command | Purpose |
+|---|---|
+| `pnpm install` | Install the dependencies |
+| `pnpm dev` | Server on port 5107 and Vite on port 5173 |
+| `pnpm test` | Unit tests and server tests (Vitest) |
+| `pnpm check` | Type checks (`tsc` and `svelte-check`) |
+| `pnpm build` | Production build into `web/dist` |
+| `pnpm e2e` | Playwright tests of the built app |
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+`SPEC.md` is the contract for the behaviour and the code. Read it before a change. `README.md` tells how to run and deploy the app.
+
+- `shared/`: pure logic and types that the server and the client both use.
+- `server/`: Node.js server with `node:http` and `node:sqlite`. No npm packages.
+- `web/`: the client. Svelte 5, TypeScript, Vite. `web/src/data/index.ts` is the only door from the UI to the data.
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+`SPEC.md` section 2 has the rules for the code. The most important:
+
+- Do not add runtime dependencies.
+- `shared/` and `server/` run with type stripping: no `enum`, no `namespace`, relative imports with `.ts`.
+- A function with more than two inputs takes one object.
+- Tests go next to the code as `name.test.ts`.
