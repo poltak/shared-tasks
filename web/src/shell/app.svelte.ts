@@ -6,12 +6,19 @@ export interface Launch {
   taskId: ID | null;
   listId: ID | null;
   newTask: boolean;
+  /** /?note=ID: the layout shows the notes, or the archive if the note is archived, and opens the note. */
+  noteId: ID | null;
+  /** /?new=note: the layout shows the notes and opens a new note. */
+  newNote: boolean;
 }
+
+/** A launch that asks for nothing. A layout acts on a launch when one of the fields has a value. */
+const NO_LAUNCH: Launch = { taskId: null, listId: null, newTask: false, noteId: null, newNote: false };
 
 export const app = $state({
   settingsOpen: false,
   shortcutsOpen: false,
-  launch: { taskId: null, listId: null, newTask: false } as Launch,
+  launch: { ...NO_LAUNCH } as Launch,
 });
 
 export function openSettings(): void {
@@ -25,13 +32,13 @@ export function openShortcuts(): void {
 /** A layout calls this when it is ready. It gets the launch request one time. */
 export function takeLaunch(): Launch {
   const launch = app.launch;
-  app.launch = { taskId: null, listId: null, newTask: false };
+  app.launch = { ...NO_LAUNCH };
   return launch;
 }
 
 /** The shell calls this at the start, and again when a notification asks for a task. */
 export function setLaunch(launch: Partial<Launch>): void {
-  app.launch = { taskId: null, listId: null, newTask: false, ...launch };
+  app.launch = { ...NO_LAUNCH, ...launch };
 }
 
 /** Closes the screens of the shell. For a sign-out, and before a notification opens a task. */

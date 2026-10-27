@@ -1,8 +1,8 @@
 // Pickers and dialogs that any code can open with one call. Each call gives a promise.
 // DialogHost.svelte, which the shell mounts one time, renders what is open.
 
-import type { DateStr } from '../../../shared/types.ts';
-import type { DateValue } from '../ui/index.ts';
+import type { DateStr, ID } from '../../../shared/types.ts';
+import type { DateValue, MenuAnchor } from '../ui/index.ts';
 
 export interface PickDateInput {
   value: DateValue;
@@ -44,6 +44,25 @@ export interface ConfirmInput {
   danger?: boolean;
 }
 
+export interface PickNoteColorInput {
+  /** The note. Each choice changes its color at once. The picker closes when the note goes away. */
+  id: ID;
+  /** A wide screen shows a popover at this element or point, and a small dialog with no anchor. A phone shows a bottom sheet. */
+  anchor?: MenuAnchor | null;
+}
+
+export interface MakeTasksInput {
+  /** The note. The dialog closes with no result when the note goes away. */
+  id: ID;
+}
+
+/** The choice of the "Make tasks" dialog: the input of `actions.noteToTasks` with the id of the note. */
+export interface MakeTasksResult {
+  listId: ID;
+  mode: 'one' | 'lines';
+  archive: boolean;
+}
+
 interface Base<Kind extends string, Input, Result> {
   id: number;
   kind: Kind;
@@ -56,7 +75,9 @@ export type DialogRequest =
   | Base<'date', PickDateInput, DateValue | null>
   | Base<'deadline', PickDeadlineInput, DeadlineResult | null>
   | Base<'prompt', PromptTextInput, string | null>
-  | Base<'confirm', ConfirmInput, boolean>;
+  | Base<'confirm', ConfirmInput, boolean>
+  | Base<'noteColor', PickNoteColorInput, null>
+  | Base<'makeTasks', MakeTasksInput, MakeTasksResult | null>;
 
 let open = $state.raw<readonly DialogRequest[]>([]);
 let serial = 0;
@@ -98,6 +119,19 @@ export function promptText(input: PromptTextInput): Promise<string | null> {
 /** A question with two buttons. Gives true only for the confirm button. */
 export function confirmDialog(input: ConfirmInput): Promise<boolean> {
   return ask('confirm', input);
+}
+
+/**
+ * The color picker of a note (SPEC section 8, "Color picker"). It changes the note itself, so the
+ * promise has no result. It ends when the picker closes. The parts are in the notes download.
+ */
+export async function pickNoteColor(input: PickNoteColorInput): Promise<void> {
+  await ask<'noteColor', null>('noteColor', input);
+}
+
+/** The "Make tasks" dialog of a note. Gives the choice of the person, or null when the person cancels. */
+export function askMakeTasks(input: MakeTasksInput): Promise<MakeTasksResult | null> {
+  return ask('makeTasks', input);
 }
 
 /** Closes each open dialog as if the person cancelled it. For a sign-out. */

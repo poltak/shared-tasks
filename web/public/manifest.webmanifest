@@ -20,6 +20,11 @@
       "name": "New task",
       "url": "/?new=1",
       "icons": [{ "src": "/icons/shortcut-new-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "New note",
+      "url": "/?new=note",
+      "icons": [{ "src": "/icons/shortcut-note-192.png", "sizes": "192x192", "type": "image/png" }]
     }
   ]
 }

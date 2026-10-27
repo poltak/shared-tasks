@@ -98,7 +98,7 @@
         out:pop|global={{ duration: 120, scale: 0.97 }}
       >
         {#if title}<h2 class="title">{title}</h2>{/if}
-        <div class={['body', { padded, top: !title }]}>{@render children()}</div>
+        <div class={['body', { padded, top: !title, bare: !title && !actions && !padded }]}>{@render children()}</div>
         {#if actions}<footer class="actions">{@render actions()}</footer>{/if}
       </div>
     {/if}
@@ -143,6 +143,12 @@
   }
   .padded.top {
     padding-top: 20px;
+  }
+  /* A content with no title, no buttons, and no padding fills the card, and it can paint its own
+     background: the note editor has the color of the note. The scroll area then has the round
+     corners of the card. */
+  .bare {
+    border-radius: inherit;
   }
   .actions {
     display: flex;

@@ -8,11 +8,20 @@ function open(address: string) {
   return replaceState;
 }
 
+const NONE = { taskId: null, listId: null, newTask: false, noteId: null, newNote: false };
+
 afterEach(() => vi.unstubAllGlobals());
 
 test('reads the task, the list, and the new task flag', () => {
   open('/?task=t1&list=l1&new=1');
-  expect(readLaunchParams()).toEqual({ taskId: 't1', listId: 'l1', newTask: true });
+  expect(readLaunchParams()).toEqual({ ...NONE, taskId: 't1', listId: 'l1', newTask: true });
+});
+
+test('reads a note, and new=note asks for a new note and not a new task', () => {
+  open('/?note=n1');
+  expect(readLaunchParams()).toEqual({ ...NONE, noteId: 'n1' });
+  open('/?new=note');
+  expect(readLaunchParams()).toEqual({ ...NONE, newNote: true });
 });
 
 test('removes only its own values from the address and keeps the history state', () => {
@@ -21,14 +30,22 @@ test('removes only its own values from the address and keeps the history state',
   expect(replaceState).toHaveBeenCalledExactlyOnceWith({ page: 1 }, '', '/some/page?keep=yes#part');
 });
 
+test('removes the note from the address, so a reload does not open it again', () => {
+  const replaceState = open('/?note=n1&keep=yes');
+  readLaunchParams();
+  expect(replaceState).toHaveBeenCalledExactlyOnceWith({ page: 1 }, '', '/?keep=yes');
+});
+
 test('gives empty values and does not change the address when there is nothing to read', () => {
   const replaceState = open('/?keep=yes');
-  expect(readLaunchParams()).toEqual({ taskId: null, listId: null, newTask: false });
+  expect(readLaunchParams()).toEqual(NONE);
   expect(replaceState).not.toHaveBeenCalled();
 });
 
-test('an empty value is no value, and only new=1 opens a new task', () => {
-  const replaceState = open('/?task=&new=0');
-  expect(readLaunchParams()).toEqual({ taskId: null, listId: null, newTask: false });
+test('an empty value is no value, and only new=1 and new=note open something new', () => {
+  const replaceState = open('/?task=&note=&new=0');
+  expect(readLaunchParams()).toEqual(NONE);
   expect(replaceState).toHaveBeenCalledExactlyOnceWith({ page: 1 }, '', '/');
+  open('/?new=Note');
+  expect(readLaunchParams()).toEqual(NONE);
 });

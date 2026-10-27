@@ -16,6 +16,10 @@ const STAR =
   'M12 3.85l2.32 5.7 6.14.45-4.7 3.97 1.47 5.98L12 16.7l-5.23 3.25 1.47-5.98L3.54 10l6.14-.45z';
 const CLOUD = 'M7.5 18.5a4.25 4.25 0 0 1-.6-8.46 5.5 5.5 0 0 1 10.57-.9A4.75 4.75 0 0 1 17 18.5z';
 const LINES = 'M4 7h16M4 12h16';
+// A push pin seen from the side: the head, the body that grows wider, the plate, and the needle.
+const PIN = 'M8.5 3.5h7M9.75 3.5V9L7 12.25V14h10v-1.75L14.25 9V3.5M12 14v6.5';
+// A box with its lid, for the archive of notes. The arrow tells the direction.
+const BOX = 'M5 4.5h14a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1zM5.5 8.5v10A1.5 1.5 0 0 0 7 20h10a1.5 1.5 0 0 0 1.5-1.5v-10';
 
 export const ICONS = {
   check: 'M4.75 12.75l4.75 4.75L19.25 7',
@@ -80,6 +84,21 @@ export const ICONS = {
   lock: 'M6.5 10.5h11A1.5 1.5 0 0 1 19 12v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18.5V12a1.5 1.5 0 0 1 1.5-1.5zM8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5',
   edit: 'M4.5 19.5l.9-3.9L15.6 5.4a1.6 1.6 0 0 1 2.26 0l.74.74a1.6 1.6 0 0 1 0 2.26L8.4 18.6zM13.75 7.25l3 3',
   moon: 'M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z',
+  // A light bulb, for the notes.
+  bulb: 'M9 17.5h6M10 20.5h4M9 15c0-1.1-.5-1.9-1.2-2.6a6 6 0 1 1 8.4 0c-.7.7-1.2 1.5-1.2 2.6v.5H9z',
+  pin: PIN,
+  'pin-filled': PIN,
+  archive: BOX + 'M12 11.5v5M9.5 14l2.5 2.5 2.5-2.5',
+  unarchive: BOX + 'M12 16.5v-5M9.5 14l2.5-2.5 2.5 2.5',
+  palette:
+    'M12 3.5a8.5 8.5 0 0 0 0 17c1.1 0 1.75-.75 1.75-1.6 0-.45-.2-.8-.45-1.1-.25-.3-.45-.65-.45-1.1 0-.9.7-1.6 1.6-1.6h1.8a4.25 4.25 0 0 0 4.25-4.25C20.5 6.9 16.7 3.5 12 3.5z' +
+    bigDot(7.5, 12) +
+    bigDot(9, 7.75) +
+    bigDot(13.5, 6.75) +
+    bigDot(16.75, 9.75),
+  search: circle(6)(10.5, 10.5) + 'M15 15l5 5',
+  // A drop with a line through it: a note with no color.
+  'color-off': 'M7.6 7.4C6.7 8.8 6 10.4 6 12a6 6 0 0 0 10.3 4.2M17.6 13.2c.3-.4.4-.8.4-1.2 0-3.6-6-9-6-9s-1.3 1.2-2.7 2.9M4 4l16 16',
   sun:
     circle(4)(12, 12) +
     'M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4',
@@ -88,6 +107,6 @@ export const ICONS = {
 export type IconName = keyof typeof ICONS;
 
 /** These icons are a filled shape. All others are an outline. */
-export const FILLED_ICONS: ReadonlySet<IconName> = new Set<IconName>(['star-filled', 'caret']);
+export const FILLED_ICONS: ReadonlySet<IconName> = new Set<IconName>(['star-filled', 'caret', 'pin-filled']);
 
 export const ICON_NAMES = Object.keys(ICONS) as IconName[];

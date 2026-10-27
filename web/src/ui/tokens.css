@@ -63,6 +63,25 @@
 
   --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
 
+  /* Note colors (SPEC section 8). The names follow NOTE_COLORS in shared/types.ts. --text and
+     --note-text-dim have a contrast of at least 4.5:1 on each of them (tokens.test.ts). The dim
+     text is a transparent ink, so it takes a little of the color of each note. */
+  --note-default: var(--surface);
+  --note-red: #fbc4bd;
+  --note-orange: #f8c39f;
+  --note-yellow: #fff3a8;
+  --note-green: #dcf2cc;
+  --note-teal: #bfe6dc;
+  --note-blue: #d3e5f2;
+  --note-darkblue: #b8d0e6;
+  --note-purple: #dfcdea;
+  --note-pink: #f9dfe4;
+  --note-brown: #e8dccb;
+  --note-gray: #e6e8ee;
+  --note-text-dim: rgb(27 28 32 / 0.72);
+  /* The thin edge of a card with the default color, which is near the color of the page. */
+  --note-edge: rgb(24 32 56 / 0.14);
+
   /* The drag and drop engine (web/src/dnd/dnd.css) reads these. */
   --dnd-accent: var(--primary);
   --dnd-lift-bg: var(--popup);
@@ -100,6 +119,21 @@
     --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
     --shadow-2: 0 0 0 1px rgb(255 255 255 / 0.07), 0 2px 6px rgb(0 0 0 / 0.4), 0 8px 20px rgb(0 0 0 / 0.36);
     --shadow-3: 0 0 0 1px rgb(255 255 255 / 0.07), 0 6px 16px rgb(0 0 0 / 0.44), 0 20px 48px rgb(0 0 0 / 0.5);
+
+    --note-default: var(--surface);
+    --note-red: #6b2230;
+    --note-orange: #683420;
+    --note-yellow: #5c4614;
+    --note-green: #284a37;
+    --note-teal: #13504b;
+    --note-blue: #1f4b5f;
+    --note-darkblue: #2c3f5c;
+    --note-purple: #46315a;
+    --note-pink: #5c3048;
+    --note-brown: #4a3f33;
+    --note-gray: #33363e;
+    --note-text-dim: rgb(228 230 235 / 0.78);
+    --note-edge: rgb(255 255 255 / 0.16);
   }
 }
 
@@ -133,4 +167,19 @@
   --shadow-1: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-2: 0 0 0 1px rgb(255 255 255 / 0.07), 0 2px 6px rgb(0 0 0 / 0.4), 0 8px 20px rgb(0 0 0 / 0.36);
   --shadow-3: 0 0 0 1px rgb(255 255 255 / 0.07), 0 6px 16px rgb(0 0 0 / 0.44), 0 20px 48px rgb(0 0 0 / 0.5);
+
+  --note-default: var(--surface);
+  --note-red: #6b2230;
+  --note-orange: #683420;
+  --note-yellow: #5c4614;
+  --note-green: #284a37;
+  --note-teal: #13504b;
+  --note-blue: #1f4b5f;
+  --note-darkblue: #2c3f5c;
+  --note-purple: #46315a;
+  --note-pink: #5c3048;
+  --note-brown: #4a3f33;
+  --note-gray: #33363e;
+  --note-text-dim: rgb(228 230 235 / 0.78);
+  --note-edge: rgb(255 255 255 / 0.16);
 }

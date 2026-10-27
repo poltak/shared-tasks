@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cancelDialogs, confirmDialog, dialogs, pickDate, pickDeadline, promptText } from './dialogs.svelte.ts';
+import { askMakeTasks, cancelDialogs, confirmDialog, dialogs, pickDate, pickDeadline, pickNoteColor, promptText } from './dialogs.svelte.ts';
 
 afterEach(() => {
   cancelDialogs();
@@ -42,9 +42,38 @@ describe('dialog requests', () => {
   });
 
   it('cancelDialogs answers each open dialog as a cancel', async () => {
-    const results = [confirmDialog({ title: 'Sure?' }), promptText({ title: 'Name' }), pickDate({ value: { date: null, time: null, repeat: null } }), pickDeadline({ value: null })];
+    const results = [
+      confirmDialog({ title: 'Sure?' }),
+      promptText({ title: 'Name' }),
+      pickDate({ value: { date: null, time: null, repeat: null } }),
+      pickDeadline({ value: null }),
+      askMakeTasks({ id: 'n1' }),
+      pickNoteColor({ id: 'n1' }),
+    ];
     cancelDialogs();
     expect(dialogs.open).toHaveLength(0);
-    expect(await Promise.all(results)).toEqual([false, null, null, null]);
+    expect(await Promise.all(results)).toEqual([false, null, null, null, null, undefined]);
+  });
+
+  it('opens the color picker of a note at its anchor, and ends when the picker closes', async () => {
+    const anchor = { x: 4, y: 8 };
+    let ended = false;
+    const result = pickNoteColor({ id: 'n1', anchor }).then(() => (ended = true));
+    const request = dialogs.open[0]!;
+    expect(request).toMatchObject({ kind: 'noteColor', input: { id: 'n1', anchor } });
+    if (request.kind !== 'noteColor') throw new Error('wrong kind');
+    await Promise.resolve();
+    expect(ended).toBe(false);
+    request.settle(null);
+    await result;
+    expect(ended).toBe(true);
+  });
+
+  it('gives the choice of the "Make tasks" dialog', async () => {
+    const result = askMakeTasks({ id: 'n1' });
+    const request = dialogs.open[0]!;
+    if (request.kind !== 'makeTasks') throw new Error('wrong kind');
+    request.settle({ listId: 'l1', mode: 'lines', archive: true });
+    expect(await result).toEqual({ listId: 'l1', mode: 'lines', archive: true });
   });
 });

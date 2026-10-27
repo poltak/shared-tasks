@@ -7,7 +7,8 @@ describe('icons', () => {
       'check', 'check-small', 'circle', 'plus', 'add-task', 'star', 'star-filled', 'more', 'close', 'back', 'menu',
       'chevron-up', 'chevron-down', 'chevron-left', 'chevron-right', 'caret', 'clock', 'repeat', 'target', 'notes',
       'bin', 'drag', 'people', 'person', 'sort', 'list', 'list-add', 'print', 'settings', 'bell', 'cloud-off', 'sync',
-      'calendar', 'indent', 'unindent', 'arrow-up', 'keyboard', 'help', 'logout', 'moon', 'sun',
+      'calendar', 'indent', 'unindent', 'arrow-up', 'keyboard', 'help', 'logout', 'moon', 'sun', 'bulb', 'pin',
+      'pin-filled', 'archive', 'unarchive', 'palette', 'search', 'color-off',
     ];
     for (const name of wanted) expect(ICON_NAMES, name).toContain(name);
   });
@@ -33,5 +34,13 @@ describe('icons', () => {
 
   it('marks only icons that are there as filled', () => {
     for (const name of FILLED_ICONS) expect(ICON_NAMES).toContain(name);
+  });
+
+  it('draws a filled icon with the same shape as its outline', () => {
+    // A pinned note and a set star look like the outline icon, but filled.
+    expect(FILLED_ICONS.has('pin-filled')).toBe(true);
+    expect(FILLED_ICONS.has('pin')).toBe(false);
+    expect(ICONS['pin-filled']).toBe(ICONS.pin);
+    expect(ICONS['star-filled']).toBe(ICONS.star);
   });
 });

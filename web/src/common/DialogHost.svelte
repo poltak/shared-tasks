@@ -1,10 +1,33 @@
 <script lang="ts">
-  import { store } from '../data/index.ts';
+  import { store, toast } from '../data/index.ts';
   import { ConfirmDialog, DatePicker, DeadlinePicker, TextPromptDialog } from '../ui/index.ts';
-  import { dialogs } from './dialogs.svelte.ts';
+  import { dialogs, type DialogRequest } from './dialogs.svelte.ts';
 
   // The shell mounts this one time. It shows the dialogs that dialogs.svelte.ts opened.
   // A request leaves the list when it has its result, and the part then plays its exit.
+
+  type NotesParts = typeof import('../notes/index.ts');
+
+  // The color picker and the "Make tasks" dialog of a note are in the notes download. The same
+  // import as the layouts' gives the same file, so it is one download, and it is there already
+  // when a note menu can open.
+  let notes = $state.raw<NotesParts | null>(null);
+  let loading = false;
+  type NoteRequest = Extract<DialogRequest, { kind: 'noteColor' | 'makeTasks' }>;
+  const isNoteDialog = (request: DialogRequest): request is NoteRequest => request.kind === 'noteColor' || request.kind === 'makeTasks';
+
+  $effect(() => {
+    if (notes || loading || !dialogs.open.some(isNoteDialog)) return;
+    loading = true;
+    import('../notes/index.ts').then(
+      (parts) => (notes = parts),
+      () => {
+        loading = false;
+        for (const request of dialogs.open) if (isNoteDialog(request)) request.settle(null);
+        toast.show({ message: 'The notes could not load. Check the connection', action: { label: 'Reload', run: () => location.reload() } });
+      },
+    );
+  });
 </script>
 
 {#each dialogs.open as request (request.id)}
@@ -39,6 +62,14 @@
       ondone={(text) => request.settle(text)}
       oncancel={() => request.settle(null)}
     />
+  {:else if request.kind === 'noteColor'}
+    {#if notes}
+      <notes.NoteColorDialog id={request.input.id} anchor={request.input.anchor} onclose={() => request.settle(null)} />
+    {/if}
+  {:else if request.kind === 'makeTasks'}
+    {#if notes}
+      <notes.MakeTasksDialog id={request.input.id} ondone={(result) => request.settle(result)} oncancel={() => request.settle(null)} />
+    {/if}
   {:else}
     <ConfirmDialog
       open

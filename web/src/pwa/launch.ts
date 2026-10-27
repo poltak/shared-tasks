@@ -7,9 +7,13 @@ export interface LaunchParams {
   listId: ID | null;
   /** From /?new=1: the "New task" shortcut of the installed app. */
   newTask: boolean;
+  /** From /?note=ID. */
+  noteId: ID | null;
+  /** From /?new=note: the "New note" shortcut of the installed app. */
+  newNote: boolean;
 }
 
-const KEYS = ['task', 'list', 'new'];
+const KEYS = ['task', 'list', 'new', 'note'];
 
 /** Reads what the app must open at the start. Call it one time: it removes the values from the address. */
 export function readLaunchParams(): LaunchParams {
@@ -19,9 +23,11 @@ export function readLaunchParams(): LaunchParams {
     taskId: params.get('task') || null,
     listId: params.get('list') || null,
     newTask: params.get('new') === '1',
+    noteId: params.get('note') || null,
+    newNote: params.get('new') === 'note',
   };
   if (KEYS.some((key) => params.has(key))) {
-    // Without this, a reload opens the task or the add sheet again.
+    // Without this, a reload opens the task, the note, or the add sheet again.
     for (const key of KEYS) params.delete(key);
     history.replaceState(history.state, '', url.pathname + url.search + url.hash);
   }
