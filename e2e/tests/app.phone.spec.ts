@@ -478,8 +478,17 @@ test.describe('complete', () => {
   test('a second press on the circle in time keeps the task open', async ({ page }) => {
     const list = panel(page, 'My Tasks');
     const present = row(list, 'Buy a birthday present');
-    await circle(present).click();
-    await circle(present).click();
+    // Two Playwright presses can be more than LEAVE_MS apart on a busy machine. Both presses go in
+    // one evaluate, with only microtasks between them, so the timer of the first press cannot fire first.
+    const between = await circle(present).evaluate(async (button: HTMLElement) => {
+      button.click();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const checked = button.getAttribute('aria-checked');
+      button.click();
+      return checked;
+    });
+    // The first press showed the check mark before the second press took it back.
+    expect(between).toBe('true');
     await page.waitForTimeout(LEAVE_MS + 200);
     await expect(present).toBeVisible();
     await expect(circle(present)).toHaveAttribute('aria-checked', 'false');

@@ -441,8 +441,17 @@ test.describe('complete', () => {
 
   test('a second click on the circle in the same moment takes the complete back', async ({ page }) => {
     const circle = row(page, 'Groceries', 'Eggs').getByRole('checkbox');
-    await circle.click();
-    await circle.click();
+    // Two Playwright clicks can be more than 300 ms apart on a busy machine. Both clicks go in one
+    // evaluate, with only microtasks between them, so the timer of the first click cannot fire first.
+    const between = await circle.evaluate(async (button: HTMLElement) => {
+      button.click();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+      const checked = button.getAttribute('aria-checked');
+      button.click();
+      return checked;
+    });
+    // The first click showed the check mark before the second click took it back.
+    expect(between).toBe('true');
     await expect(circle).not.toBeChecked();
     await page.waitForTimeout(600);
     await expectTitles(page, 'Groceries', GROCERIES);
