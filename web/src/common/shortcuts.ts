@@ -1,5 +1,5 @@
 // The keyboard shortcuts of the wide layout (SPEC.md section 8), as data for the help dialog.
-// The rows and their order are the rows of the SPEC table.
+// The rows and their order are the rows of the two SPEC tables: the tasks, then the notes.
 
 /** One key press: the keys that go down together, for example ['Ctrl', 'Shift', '↑']. */
 export type KeyCombo = readonly string[];
@@ -37,6 +37,13 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('Print the list', [['Ctrl', 'P']]),
   row('Show the shortcut list', [['?'], ['Ctrl', '/']]),
   row('Undo', [['Ctrl', 'Z']]),
+];
+
+/** The keys of the Notes view and of the Archive view. The help dialog shows them below the heading "Notes". */
+export const NOTE_SHORTCUTS: readonly Shortcut[] = [
+  row('New note', [['n'], ['c']]),
+  row('Search the notes', [['/']]),
+  row('Close the composer or the editor', [['Esc']]),
 ];
 
 /** true on a Mac, an iPhone, or an iPad: the keyboard has Command and Option. */

@@ -6,15 +6,20 @@ export { default as TaskChips } from './TaskChips.svelte';
 export { default as CompletedMeta } from './CompletedMeta.svelte';
 
 export {
+  askMakeTasks,
   cancelDialogs,
   confirmDialog,
   pickDate,
   pickDeadline,
+  pickNoteColor,
   promptText,
   type ConfirmInput,
   type DeadlineResult,
+  type MakeTasksInput,
+  type MakeTasksResult,
   type PickDateInput,
   type PickDeadlineInput,
+  type PickNoteColorInput,
   type PromptTextInput,
 } from './dialogs.svelte.ts';
 export {
@@ -51,5 +56,5 @@ export {
   type TaskMenuHooks,
 } from './menus.ts';
 export { BADGE_DELAY_MS, syncBadge, type SyncBadge } from './sync-badge.svelte.ts';
-export { hasMod, isMac, shortcutKeys, SHORTCUTS, type KeyCombo, type Shortcut } from './shortcuts.ts';
+export { hasMod, isMac, NOTE_SHORTCUTS, shortcutKeys, SHORTCUTS, type KeyCombo, type Shortcut } from './shortcuts.ts';
 export { printList } from './print.ts';

@@ -4,17 +4,25 @@
   import { actions, listsOrdered, listView } from '../data/index.ts';
   import Checkbox from '../ui/Checkbox.svelte';
   import Icon from '../ui/Icon.svelte';
-  import { closeEdit, showAll, showList, showStarred, ui } from './state.svelte.ts';
+  import { closeEdit, compose, showList, showView, ui } from './state.svelte.ts';
 
-  // The sidebar: "Create", the two views, and the lists with a check box that shows or hides
-  // the column of each list.
+  // The sidebar: "Create", the views, and the lists with a check box that shows or hides the
+  // column of each list.
   let listsOpen = $state(true);
+
+  const view = $derived(ui.view);
 
   function setShown(list: ListRow, shown: boolean): void {
     // The open row can be in the column that goes away.
     if (!shown && ui.edit?.column === list.id) closeEdit();
     actions.setListHidden({ id: list.id, hidden: !shown });
-    if (shown && !ui.starred) ui.reveal = list.id;
+    if (shown && view === 'board') ui.reveal = list.id;
+  }
+
+  /** A new task, or a new note in the notes views. */
+  function create(): void {
+    if (ui.notes) compose();
+    else ui.createOpen = true;
   }
 
   async function newList(): Promise<void> {
@@ -24,19 +32,27 @@
 </script>
 
 <div class="side">
-  <button class="create ui-state" type="button" onclick={() => (ui.createOpen = true)}>
+  <button class="create ui-state" type="button" onclick={create}>
     <Icon name="plus" size={24} />
     <span>Create</span>
   </button>
 
   <nav class="views" aria-label="Views">
-    <button class="item ui-state" type="button" aria-current={ui.starred ? undefined : 'page'} onclick={showAll}>
+    <button class="item ui-state" type="button" aria-current={view === 'board' ? 'page' : undefined} onclick={() => showView('board')}>
       <Icon name="add-task" size={20} />
       <span class="text">All tasks</span>
     </button>
-    <button class="item ui-state" type="button" aria-current={ui.starred ? 'page' : undefined} onclick={showStarred}>
-      <Icon name={ui.starred ? 'star-filled' : 'star'} size={20} />
+    <button class="item ui-state" type="button" aria-current={view === 'starred' ? 'page' : undefined} onclick={() => showView('starred')}>
+      <Icon name={view === 'starred' ? 'star-filled' : 'star'} size={20} />
       <span class="text">Starred</span>
+    </button>
+    <button class="item ui-state" type="button" aria-current={view === 'notes' ? 'page' : undefined} onclick={() => showView('notes')}>
+      <Icon name="bulb" size={20} />
+      <span class="text">Notes</span>
+    </button>
+    <button class="item ui-state" type="button" aria-current={view === 'archive' ? 'page' : undefined} onclick={() => showView('archive')}>
+      <Icon name="archive" size={20} />
+      <span class="text">Archive</span>
     </button>
   </nav>
 

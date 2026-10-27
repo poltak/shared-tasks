@@ -1,10 +1,11 @@
 // The state of the wide layout that more than one part reads: the view, the selected row, the
-// row that is open for editing, the rows that leave after "complete", and the open menu.
+// row that is open for editing, the rows that leave after "complete", the open menu, and the
+// note editor and composer of the notes views.
 //
 // A row is open by its id, not by the focus. So the row stays open when the browser moves its
 // element (a new sort place, a different column), and the editor puts the focus back.
 
-import { untrack } from 'svelte';
+import { flushSync, untrack } from 'svelte';
 import { SvelteSet } from 'svelte/reactivity';
 import { addDays } from '../../../shared/dates.ts';
 import { newId } from '../../../shared/ids.ts';
@@ -15,6 +16,7 @@ import type {
   ID,
   ListRow,
   ListView,
+  NoteRow,
   RepeatRule,
   TaskPosition,
   TaskRow,
@@ -29,9 +31,20 @@ import { reducedMotion } from '../ui/motion.ts';
 import type { DateValue, MenuAnchor, MenuItem } from '../ui/types.ts';
 import { flowAfter, rowElement } from './flow.ts';
 
+/** The parts of web/src/notes/. The layout downloads them when a notes view first shows. */
+export type NotesParts = typeof import('../notes/index.ts');
+
 /** A column of the main area: the id of a list, or `STARRED`. */
 export type ColumnKey = string;
 export const STARRED = 'starred';
+/** `prefs.lastTab` of the Notes view and of the Archive view. On the phone it is the Notes tab. */
+export const NOTES = 'notes';
+
+/** The views of the main area. 'notes' and 'archive' are the two notes views. */
+export type View = 'board' | 'starred' | 'notes' | 'archive';
+
+/** The id of the search field of the notes views, for the key "/". */
+export const NOTES_SEARCH_ID = 'notes-search';
 
 /** The group of a row that has no place in the view yet. It shows above all groups. */
 export const DRAFT_GROUP = '~draft';
@@ -183,6 +196,16 @@ let repeatRequest = $state.raw<RepeatRequest | null>(null);
 /** A column that the board must bring into view. The board clears it. */
 let reveal = $state.raw<ColumnKey | null>(null);
 
+// The two notes views store the same `prefs.lastTab`, so the choice between them is only here.
+// A start shows the notes, not the archive.
+let archiveShown = $state(false);
+/** The note of the editor dialog. */
+let noteOpen = $state.raw<ID | null>(null);
+let composerOpen = $state(false);
+let noteQuery = $state('');
+/** The composer of the notes board, while it is on the screen. */
+let composer: { focus: () => void } | null = null;
+
 /** The rows that show as completed for a moment before the data changes. */
 export const leaving = new SvelteSet<ID>();
 const leaveTimers = new Map<ID, ReturnType<typeof setTimeout>>();
@@ -225,27 +248,113 @@ export const ui = {
   set reveal(column: ColumnKey | null) {
     reveal = column;
   },
-  /** true: the Starred view. false: one column for each list. */
+  /** The view of the main area. A list id in `prefs.lastTab` (from the phone) is "All tasks". */
+  get view(): View {
+    const tab = prefs.lastTab;
+    if (tab === STARRED) return 'starred';
+    if (tab === NOTES) return archiveShown ? 'archive' : 'notes';
+    return 'board';
+  },
+  /** true: the Starred view. */
   get starred(): boolean {
     return prefs.lastTab === STARRED;
+  },
+  /** true: the Notes view or the Archive view. */
+  get notes(): boolean {
+    return prefs.lastTab === NOTES;
+  },
+  /** The note that is open in the editor dialog. */
+  get noteId(): ID | null {
+    return noteOpen;
+  },
+  /** The composer of the Notes view is open. The composer writes it too. */
+  get composerOpen(): boolean {
+    return composerOpen;
+  },
+  set composerOpen(open: boolean) {
+    composerOpen = open;
+  },
+  /** The text of the search field of the notes views. */
+  get noteQuery(): string {
+    return noteQuery;
+  },
+  set noteQuery(text: string) {
+    noteQuery = text;
   },
 };
 
 // ---- Views ----
 
-export function showAll(): void {
-  if (!ui.starred) return;
+/** Shows a view. The open row, the selection, the note editor, and the composer close. */
+export function showView(view: View): void {
+  if (ui.view === view) return;
   closeEdit();
   setSelected(null);
-  // The phone layout reads the same setting for its last tab. It starts at its first list then.
-  prefs.lastTab = null;
+  noteOpen = null;
+  composerOpen = false;
+  // The search is for the notes. Between the two notes views it stays, as the field does.
+  if (view !== 'notes' && view !== 'archive') noteQuery = '';
+  archiveShown = view === 'archive';
+  // The phone layout reads the same setting for its last tab. With null it starts at its first list.
+  prefs.lastTab = view === 'board' ? null : view === 'starred' ? STARRED : NOTES;
+}
+
+export function showAll(): void {
+  showView('board');
 }
 
 export function showStarred(): void {
-  if (ui.starred) return;
-  closeEdit();
-  setSelected(null);
-  prefs.lastTab = STARRED;
+  showView('starred');
+}
+
+/**
+ * The layout goes off the screen. The next wide layout starts with the notes and not the archive,
+ * also after a change to the phone layout and back.
+ */
+export function resetNotes(): void {
+  archiveShown = false;
+  noteOpen = null;
+  composerOpen = false;
+  noteQuery = '';
+}
+
+// ---- Notes ----
+
+/** The notes board gives its composer while the composer is on the screen. */
+export function setComposer(part: { focus: () => void } | null): void {
+  composer = part;
+}
+
+/**
+ * "Create", n, and c in the notes views, and /?new=note: the Notes view with the composer open
+ * and the focus in its body. `now`: the call is in the handler of a press or a key, so the focus
+ * comes in the same call, which a tablet needs to show its keyboard. An effect must give false.
+ */
+export function compose({ now = true }: { now?: boolean } = {}): void {
+  showView('notes');
+  if (now) {
+    // From the archive, the composer comes with this change of the view.
+    flushSync();
+    if (composer) return composer.focus();
+  }
+  // The composer is not there yet (the notes parts are still on the way): it opens when it comes.
+  composerOpen = true;
+}
+
+export function openNote(id: ID): void {
+  noteOpen = id;
+}
+
+export function closeNote(): void {
+  noteOpen = null;
+}
+
+/** "/" in the notes views. The text in the field is selected, so a new word replaces it. */
+export function focusSearch(): void {
+  const field = document.getElementById(NOTES_SEARCH_ID);
+  if (!(field instanceof HTMLInputElement)) return;
+  field.focus();
+  field.select();
 }
 
 /** Shows the column of a list: the view with all lists, the list not hidden, the column in view. */
@@ -823,6 +932,35 @@ export function openListMenu({ list, anchor }: { list: ListRow; anchor: MenuAnch
 export function openStarredMenu(anchor: MenuAnchor): void {
   closeEdit();
   openMenu({ anchor, align: 'end', label: 'Starred options', items: starredMenuItems(), run: runStarredMenuItem });
+}
+
+/**
+ * The note menu: from the three-dot button of a card or of the editor, or a right click on a
+ * card. `anchor` goes to "Change color" too, so the color picker shows at the same place.
+ * `onrun` is called after an entry started, for example so the editor closes after "Archive".
+ */
+export function openNoteMenu({
+  note,
+  anchor,
+  parts,
+  onrun,
+}: {
+  note: NoteRow;
+  anchor: MenuAnchor;
+  parts: Pick<NotesParts, 'noteMenuItems' | 'runNoteMenuItem'>;
+  onrun?: (itemId: string) => void;
+}): void {
+  openMenu({
+    anchor,
+    align: 'start',
+    label: 'Note options',
+    items: parts.noteMenuItems({ note }),
+    // The note of the time of the open: "Pin" and "Archive" do what their labels said then.
+    run: (itemId) => {
+      void parts.runNoteMenuItem({ note, itemId, anchor });
+      onrun?.(itemId);
+    },
+  });
 }
 
 /** A menu with one entry for each list, for the list of a new task. */

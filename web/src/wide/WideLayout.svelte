@@ -3,17 +3,32 @@
   import type { ID, TaskRow } from '../../../shared/types.ts';
   import { isOpen } from '../../../shared/view.ts';
   import '../ui/tooltip.ts';
-  import { getList, getTask, prefs, store } from '../data/index.ts';
+  import { getList, getNote, getTask, prefs, store, toast } from '../data/index.ts';
   import { app, takeLaunch, type Launch } from '../shell/app.svelte.ts';
   import Menu from '../ui/Menu.svelte';
   import { reducedMotion } from '../ui/motion.ts';
   import Board from './Board.svelte';
   import { handleKey } from './keys.ts';
   import { lazy } from './lazy.svelte.ts';
+  import NotesBoard from './NotesBoard.svelte';
   import Sidebar from './Sidebar.svelte';
   import StarredColumn from './StarredColumn.svelte';
   import TopBar from './TopBar.svelte';
-  import { closeEdit, closeRepeat, press, runMenu, select, settle, showList, startEdit, ui } from './state.svelte.ts';
+  import {
+    closeEdit,
+    closeRepeat,
+    compose,
+    openNote,
+    press,
+    resetNotes,
+    runMenu,
+    select,
+    settle,
+    showList,
+    showView,
+    startEdit,
+    ui,
+  } from './state.svelte.ts';
 
   // The layout for a window of 840 px or more: a bar, a sidebar, and one column for each list.
   const SIDEBAR_WIDTH = 280;
@@ -37,6 +52,16 @@
   });
   $effect(() => {
     if (ui.repeat) void repeatDialog.get();
+  });
+
+  // The notes parts are one download (SPEC section 8, "Notes"). It starts when a notes view first
+  // shows, and the board shows when it is there, with no spinner.
+  const notes = lazy(() => import('../notes/index.ts').then((parts) => ({ default: parts })));
+  $effect(() => {
+    if (!ui.notes) return;
+    void notes.get().then((ok) => {
+      if (!ok) toast.show({ message: 'The notes could not load. Check the connection', action: { label: 'Reload', run: () => location.reload() } });
+    });
   });
 
   // ---- The sidebar ----
@@ -114,6 +139,7 @@
       settle();
       closeEdit();
       select(null);
+      resetNotes();
     };
   });
 
@@ -121,6 +147,8 @@
 
   /** A task that the address asked for and that this device does not have yet. */
   let wanted = $state<ID | null>(null);
+  /** The same for a note. */
+  let wantedNote = $state<ID | null>(null);
 
   function openTask(task: TaskRow): void {
     showList(task.listId);
@@ -134,11 +162,16 @@
     if (launch.newTask) ui.createOpen = true;
     if (launch.taskId !== null) wanted = launch.taskId;
     else if (launch.listId !== null && getList(launch.listId)) showList(launch.listId);
+    // The notes show at once. The archive replaces them if the note is archived when it is there.
+    if (launch.noteId !== null) {
+      showView('notes');
+      wantedNote = launch.noteId;
+    } else if (launch.newNote) compose({ now: false });
   }
 
   $effect(() => {
-    const { taskId, listId, newTask } = app.launch;
-    if (taskId === null && listId === null && !newTask) return;
+    const { taskId, listId, newTask, noteId, newNote } = app.launch;
+    if (taskId === null && listId === null && !newTask && noteId === null && !newNote) return;
     untrack(() => act(takeLaunch()));
   });
 
@@ -157,6 +190,25 @@
     const timer = setTimeout(() => (wanted = null), 8000);
     return () => clearTimeout(timer);
   });
+
+  // The editor of a note that is not on the device would close at once, so it waits for the row.
+  $effect(() => {
+    const id = wantedNote;
+    if (id === null) return;
+    const note = getNote(id);
+    if (note) {
+      untrack(() => {
+        wantedNote = null;
+        // The person can have gone to a different view while the note was on the way.
+        if (!ui.notes) return;
+        showView(note.archived ? 'archive' : 'notes');
+        openNote(id);
+      });
+      return;
+    }
+    const timer = setTimeout(() => (wantedNote = null), 8000);
+    return () => clearTimeout(timer);
+  });
 </script>
 
 <svelte:window onkeydown={handleKey} />
@@ -168,7 +220,9 @@
       <Sidebar />
     </aside>
     <main class={['main', { inset }]} bind:this={main} data-print-flow>
-      {#if ui.starred}
+      {#if ui.notes}
+        {#if notes.part}<NotesBoard parts={notes.part} />{/if}
+      {:else if ui.starred}
         <StarredColumn />
       {:else}
         <Board />

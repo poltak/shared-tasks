@@ -244,7 +244,9 @@ test.describe('layout', () => {
     await page.getByRole('button', { name: 'Keyboard shortcuts' }).click();
     const help = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
     await expect(help).toBeVisible();
-    await expect(help.getByRole('row')).toHaveCount(17);
+    // The tasks table, then the notes table with its heading. Each has a row of column headings.
+    await expect(help.getByRole('table').first().getByRole('row')).toHaveCount(17);
+    await expect(help.getByRole('table', { name: 'Notes' }).getByRole('row')).toHaveCount(4);
   });
 });
 

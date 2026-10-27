@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SHORTCUTS } from './shortcuts.ts';
+import { NOTE_SHORTCUTS, SHORTCUTS } from './shortcuts.ts';
 
 const text = (keys: readonly (readonly string[])[], joiner: string): string => keys.map((combo) => combo.join('+')).join(` ${joiner} `);
 
@@ -25,12 +25,22 @@ describe('SHORTCUTS', () => {
     ]);
   });
 
+  it('has the rows of the SPEC table of the notes views in order', () => {
+    expect(NOTE_SHORTCUTS.map((shortcut) => [shortcut.action, text(shortcut.keys, shortcut.joiner)])).toEqual([
+      ['New note', 'n or c'],
+      ['Search the notes', '/'],
+      ['Close the composer or the editor', 'Esc'],
+    ]);
+    // The keys of the notes need no modifier, so they are the same on a Mac.
+    expect(NOTE_SHORTCUTS.map((shortcut) => shortcut.macKeys)).toEqual(NOTE_SHORTCUTS.map((shortcut) => shortcut.keys));
+  });
+
   it('uses Command for Ctrl, Option for Alt, and the Shift sign on a Mac', () => {
     const mac = Object.fromEntries(SHORTCUTS.map((shortcut) => [shortcut.action, text(shortcut.macKeys, shortcut.joiner)]));
     expect(mac['Add a subtask']).toBe('⌘+⌥+Enter');
     expect(mac['Move to top, move to bottom']).toBe('⌘+⇧+↑ and ⌘+⇧+↓');
     expect(mac['Delete']).toBe('Delete or Backspace');
-    for (const shortcut of SHORTCUTS) {
+    for (const shortcut of [...SHORTCUTS, ...NOTE_SHORTCUTS]) {
       expect(shortcut.macKeys).toHaveLength(shortcut.keys.length);
       expect(shortcut.macKeys.flat().some((key) => key === 'Ctrl' || key === 'Alt' || key === 'Shift')).toBe(false);
     }

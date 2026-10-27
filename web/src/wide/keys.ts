@@ -1,4 +1,5 @@
 // The keyboard shortcuts of the wide layout (SPEC.md section 8). They work on the selected row.
+// The notes views have their own short table, and the keys of the tasks do nothing there.
 // Ctrl+Z is in the shell, because it is the same in the two layouts.
 
 import { isOpen } from '../../../shared/view.ts';
@@ -12,9 +13,11 @@ import {
   closeEdit,
   columnOf,
   complete,
+  compose,
   currentColumn,
   draftChild,
   draftTop,
+  focusSearch,
   moveBy,
   moveColumn,
   moveSelection,
@@ -66,6 +69,11 @@ export function handleKey(event: KeyboardEvent): void {
   if ((plain && event.key === '?') || (mod && !event.altKey && event.key === '/')) {
     done();
     openShortcuts();
+    return;
+  }
+
+  if (ui.notes) {
+    if (plain) notesKey(event, key);
     return;
   }
 
@@ -146,5 +154,21 @@ export function handleKey(event: KeyboardEvent): void {
   } else if (plain && key === 's') {
     done();
     toggleStar(task);
+  }
+}
+
+/** The keys of the Notes view and of the Archive view. */
+function notesKey(event: KeyboardEvent, key: string): void {
+  if (key === 'n' || key === 'c') {
+    event.preventDefault();
+    // A key that stays down must not open a second note.
+    if (!event.repeat) compose();
+  } else if (key === '/') {
+    event.preventDefault();
+    focusSearch();
+  } else if (key === 'Escape' && ui.composerOpen) {
+    // The composer uses Esc itself while the focus is in it. This is for a focus outside of it.
+    event.preventDefault();
+    ui.composerOpen = false;
   }
 }
