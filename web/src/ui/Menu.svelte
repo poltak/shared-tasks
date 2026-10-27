@@ -2,7 +2,7 @@
   import BottomSheet from './BottomSheet.svelte';
   import Icon from './Icon.svelte';
   import { layout } from './layout.svelte.ts';
-  import { pop } from './motion.ts';
+  import { pop, release } from './motion.ts';
   import { keyboardUsed, portal, pushOverlay } from './overlay.svelte.ts';
   import type { MenuAnchor, MenuItem } from './types.ts';
 
@@ -175,6 +175,7 @@
     <div
       class="backdrop"
       role="presentation"
+      out:release
       onpointerdown={close}
       oncontextmenu={(event) => {
         event.preventDefault();

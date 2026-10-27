@@ -46,3 +46,12 @@ export function slide(_node: Element, { duration = 220 }: { duration?: number } 
     css: (t, u) => `opacity:${Math.min(1, t * 2)};transform:translateX(${u * 100}%)`,
   };
 }
+
+/**
+ * An exit with no motion, for the backdrop of a popover. Svelte makes an element inert while it
+ * leaves, so a press or a right click during the exit of the popover reaches the page, and does
+ * not only close a popover that is closed already.
+ */
+export function release(_node: Element): TransitionConfig {
+  return { duration: 0 };
+}

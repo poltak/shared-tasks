@@ -18,7 +18,7 @@ export {
   type OverlayHandle,
   type OverlayOptions,
 } from './overlay.svelte.ts';
-export { fade, pop, reducedMotion, rise, slide } from './motion.ts';
+export { fade, pop, reducedMotion, release, rise, slide } from './motion.ts';
 export { tooltip } from './tooltip.ts';
 export type { DateValue, MenuAnchor, MenuItem, RepeatResult, SelectOption } from './types.ts';
 
