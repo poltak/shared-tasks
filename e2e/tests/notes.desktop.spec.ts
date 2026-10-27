@@ -311,6 +311,18 @@ test.describe('card and menu', () => {
     await expect(item(page, 'Unpin')).toBeVisible();
   });
 
+  test('after a pin in the dialog, Esc gives the focus back to the card', async ({ page }) => {
+    await showNotes(page);
+    const editor = await openCard(page, 'Book club reading list');
+    await editor.getByRole('button', { name: 'Pin note' }).click();
+    await expect(editor.getByRole('button', { name: 'Unpin note' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialog(page)).toHaveCount(0);
+    await expectCards(page, ['Lake house checklist', 'Book club reading list', 'Dinner party menu', 'Ring the plumber before Friday']);
+    // The card moved from "Others" to "Pinned", so its open button is a new element.
+    await expect(cardButton(page, 'Book club reading list')).toBeFocused();
+  });
+
   test('archive: the archive button of a card, Undo, and "Unarchive" in the Archive view', async ({ page }) => {
     await showNotes(page);
     const book = card(page, 'Book club reading list');

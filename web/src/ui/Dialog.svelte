@@ -27,6 +27,8 @@
     headerActions?: Snippet;
     /** Full screen only: content of the top bar in place of the title, for example a list selector. */
     heading?: Snippet;
+    /** Where the focus goes after the close if the opener is not in the page now. */
+    returnFocus?: () => HTMLElement | null | undefined;
   }
   let {
     open = $bindable(false),
@@ -41,6 +43,7 @@
     actions,
     headerActions,
     heading,
+    returnFocus,
   }: Props = $props();
 
   const full = $derived(fullscreen && layout.phone);
@@ -55,7 +58,7 @@
   $effect(() => {
     if (!open || !card) return;
     const element = card;
-    return pushOverlay({ close, element: () => element }).remove;
+    return pushOverlay({ close, element: () => element, returnFocus: () => returnFocus?.() }).remove;
   });
 </script>
 

@@ -20,6 +20,8 @@ export interface OverlayOptions {
   lockScroll?: boolean;
   /** false: the focus does not go into the element and does not go back. Default true. */
   focus?: boolean;
+  /** Where the focus goes after the close if no opener is in the page now (the page made it again). */
+  returnFocus?: () => HTMLElement | null | undefined;
 }
 
 export interface OverlayHandle {
@@ -155,6 +157,8 @@ function focusBack(entry: Entry): void {
       return;
     }
   }
+  const fallback = entry.options.returnFocus?.();
+  if (fallback?.isConnected && !fallback.closest('[inert]')) fallback.focus({ preventScroll: true });
 }
 
 function onKeydown(event: KeyboardEvent): void {

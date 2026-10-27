@@ -18,9 +18,21 @@
 
   let editor = $state<{ finish: () => void }>();
 
+  // The prop is null while the dialog fades out, so the close keeps the id for `cardButton`.
+  let closedId: ID | null = null;
+
   function close(): void {
+    closedId = id;
     editor?.finish();
     closeNote();
+  }
+
+  // A pin or an unpin moves the card to the other block of the grid, and the grid makes a new
+  // open button. Then the focus goes back to that button, and not to the old one.
+  function cardButton(): HTMLElement | null {
+    const noteId = closedId ?? id;
+    if (!noteId) return null;
+    return document.querySelector<HTMLElement>(`[data-note-id="${CSS.escape(noteId)}"] > button.open`);
   }
 
   function menu(anchor: MenuAnchor): void {
@@ -30,6 +42,6 @@
   }
 </script>
 
-<Dialog open width={600} padded={false} label="Note" onclose={close}>
+<Dialog open width={600} padded={false} label="Note" onclose={close} returnFocus={cardButton}>
   <parts.NoteEditor bind:this={editor} {id} isNew={false} onclose={close} onmenu={menu} />
 </Dialog>
