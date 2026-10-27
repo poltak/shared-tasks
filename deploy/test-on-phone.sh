@@ -1,7 +1,8 @@
 #!/bin/sh
-# Runs the browser tests against the code on the phone, through Tailscale and HTTPS.
+# Runs the browser tests against the code on the phone, through Meshnet and HTTPS.
 # Usage: deploy/test-on-phone.sh [playwright arguments]
-# For the time of the run, a second server on the phone uses a test database and HTTPS port 10000.
+# For the time of the run, a second server on the phone uses a test database. Caddy on the phone
+# sends HTTPS port 10000 to it (port 5017). The Caddyfile of the phone must have that block.
 # The real server and its database are not touched.
 set -eu
 
@@ -23,7 +24,6 @@ origin="https://$public_host:10000"
 
 cleanup() {
   remote 'b="$HOME/shared-tasks"
-    tailscale --socket="$HOME/.tailscale/tailscaled.sock" serve --https=10000 off >/dev/null 2>&1 || true
     [ -f "$b/test.pid" ] && kill "$(cat "$b/test.pid")" 2>/dev/null || true
     rm -rf "$b/data-test" "$b/test.pid" "$b/test-server.log" "$b/app/e2e"' || true
 }
@@ -37,13 +37,12 @@ set -eu
 b="$HOME/shared-tasks"
 rm -rf "$b/data-test"
 cd "$b/app"
-export PORT=5008 HOST=127.0.0.1 DATA_DIR="$b/data-test" WEB_DIR="$b/app/web/dist"
+export PORT=5017 HOST=127.0.0.1 DATA_DIR="$b/data-test" WEB_DIR="$b/app/web/dist"
 export ST_TEST_RESET=1 MAX_USERS=3 PUBLIC_ORIGIN="$TEST_ORIGIN" NODE_NO_WARNINGS=1
 node server/cli.ts seed
 setsid node server/main.ts > "$b/test-server.log" 2>&1 &
 echo $! > "$b/test.pid"
 sleep 2
-tailscale --socket="$HOME/.tailscale/tailscaled.sock" serve --bg --https=10000 http://127.0.0.1:5008 >/dev/null
 REMOTE
 
 echo "Test server: $origin"

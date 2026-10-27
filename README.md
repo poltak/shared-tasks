@@ -92,7 +92,7 @@ node server/cli.ts reset-password NAME
 
 ## Run it on the phone
 
-The server runs in Termux on an Android phone, behind `tailscale serve`.
+The server runs in Termux on an Android phone, behind Caddy, which puts HTTPS in front of it.
 
 The scripts read the address of the phone from `deploy/.env`. Copy `deploy/env.example` to that name and set the values. The file is not in the repository.
 

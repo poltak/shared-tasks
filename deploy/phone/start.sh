@@ -1,6 +1,6 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # Starts the Shared Tasks server on localhost only.
-# `tailscale serve` puts HTTPS in front of it, so no other device gets plain HTTP.
+# Caddy puts HTTPS in front of it, so no other device gets plain HTTP.
 # The settings of this phone are in ~/shared-tasks/env, which is not in the repository.
 cd "$HOME/shared-tasks/app" || exit 1
 export PORT=5007
