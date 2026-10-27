@@ -1,22 +1,25 @@
-import type { ID, ListRow, Op, TaskRow } from '../../../shared/types.ts';
+import type { ID, ListRow, NoteRow, Op, TaskRow } from '../../../shared/types.ts';
 
 /** All that a device keeps for one account. */
 export interface Snapshot {
   lists: ListRow[];
   tasks: TaskRow[];
+  notes: NoteRow[];
   outbox: Op[];
-  /** `since`, `clientId`, `clock`, `offset`, `syncedAt`, `me`. */
+  /** `since`, `clientId`, `clock`, `offset`, `syncedAt`, `me`, `notesSynced`. */
   meta: Record<string, unknown>;
 }
 
 /** The changes of one tick. An adapter writes them in one transaction. */
 export interface WriteBatch {
-  /** true: all lists and tasks go away first, because the server sent a full set of rows. */
+  /** true: all lists, tasks, and notes go away first, because the server sent a full set of rows. */
   clear: boolean;
   lists: ListRow[];
   listsGone: ID[];
   tasks: TaskRow[];
   tasksGone: ID[];
+  notes: NoteRow[];
+  notesGone: ID[];
   ops: Op[];
   opsGone: ID[];
   meta: Record<string, unknown>;
@@ -55,6 +58,7 @@ export interface MemoryStorage extends StorageFactory {
 interface MemoryDb {
   lists: Map<ID, ListRow>;
   tasks: Map<ID, TaskRow>;
+  notes: Map<ID, NoteRow>;
   outbox: Map<ID, Op>;
   meta: Map<string, unknown>;
 }
@@ -73,6 +77,7 @@ export function memoryStorage(): MemoryStorage {
     structuredClone({
       lists: [...db.lists.values()],
       tasks: [...db.tasks.values()],
+      notes: [...db.notes.values()],
       outbox: [...db.outbox.values()],
       meta: Object.fromEntries(db.meta),
     });
@@ -81,10 +86,10 @@ export function memoryStorage(): MemoryStorage {
     async open(userId) {
       let db = dbs.get(userId);
       if (!db) {
-        db = { lists: new Map(), tasks: new Map(), outbox: new Map(), meta: new Map() };
+        db = { lists: new Map(), tasks: new Map(), notes: new Map(), outbox: new Map(), meta: new Map() };
         dbs.set(userId, db);
       }
-      const { lists, tasks, outbox, meta } = db;
+      const { lists, tasks, notes, outbox, meta } = db;
       return {
         load: async () => read(db),
         async write(batch) {
@@ -92,11 +97,14 @@ export function memoryStorage(): MemoryStorage {
           if (batch.clear) {
             lists.clear();
             tasks.clear();
+            notes.clear();
           }
           for (const row of batch.lists) lists.set(row.id, row);
           for (const id of batch.listsGone) lists.delete(id);
           for (const row of batch.tasks) tasks.set(row.id, row);
           for (const id of batch.tasksGone) tasks.delete(id);
+          for (const row of batch.notes) notes.set(row.id, row);
+          for (const id of batch.notesGone) notes.delete(id);
           for (const op of batch.ops) outbox.set(op.opId, op);
           for (const id of batch.opsGone) outbox.delete(id);
           for (const [key, value] of Object.entries(batch.meta)) meta.set(key, value);

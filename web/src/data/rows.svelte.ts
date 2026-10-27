@@ -6,19 +6,22 @@ import type {
   ID,
   ListRow,
   ListView,
+  NoteRow,
+  NotesView,
   Put,
   StarredSort,
   TaskRow,
   ViewGroup,
   ViewItem,
 } from '../../../shared/types.ts';
-import { buildListView, buildStarredView, comparePos, orderLists } from '../../../shared/view.ts';
+import { buildListView, buildNotesView, buildStarredView, comparePos, orderLists } from '../../../shared/view.ts';
 
 // The rows of the device in memory, and what the screen reads from them.
 //
 // The rows are in plain Maps: 5,000 reactive objects would cost time at each start. A reader
 // depends on small counters instead. Each list has two: one for its row and one for its tasks.
-// So a change in one list makes only the readers of that list run again.
+// So a change in one list makes only the readers of that list run again. The notes have one
+// counter of their own: a household has some hundred notes, and a note is in no list.
 
 const EMPTY_VIEW: ListView = Object.freeze({ groups: [], completed: [], openCount: 0 }) as ListView;
 const NO_TASKS: TaskRow[] = [];
@@ -43,23 +46,28 @@ class Cell {
   subtasks: Map<ID, TaskRow[]> | null = null;
 }
 
+/** The notes views that the cache keeps. A search makes a new input at each key. */
+const NOTES_VIEWS_MAX = 8;
+
 /** What a sync brings: the new row for each id, or null for a row that goes away. */
 export interface RowChanges {
   lists: Map<ID, ListRow | null>;
   tasks: Map<ID, TaskRow | null>;
+  notes: Map<ID, NoteRow | null>;
 }
 
 /** The ids of the rows that have a different value now. The local database must write them. */
 export interface Changed {
   lists: ID[];
   tasks: ID[];
+  notes: ID[];
 }
 
 export interface RowStore {
   /** For shared/actions.ts and for reads with no dependency. Change the rows only through this store. */
   readonly rows: Rows;
   /** Replaces all rows, at the start of the device. */
-  load(input: { lists: readonly ListRow[]; tasks: readonly TaskRow[] }): void;
+  load(input: { lists: readonly ListRow[]; tasks: readonly TaskRow[]; notes: readonly NoteRow[] }): void;
   /** Applies local puts. Gives the puts that changed a row. */
   apply(puts: readonly Put[]): { applied: Put[]; changed: Changed };
   /** Writes rows from the server. A row with the values that the device has keeps its object. */
@@ -70,10 +78,12 @@ export interface RowStore {
   listView(listId: ID): ListView;
   starredView(): ListView;
   subtasksOf(taskId: ID): TaskRow[];
+  getNote(id: ID): NoteRow | undefined;
+  notesView(input: { archived: boolean; query: string }): NotesView;
   /** Makes the reader depend on each change of a row. For a reader that reads `rows` directly. */
   watchAll(): void;
   /** How many times a view was built. A test reads it. */
-  readonly builds: { list: number; starred: number };
+  readonly builds: { list: number; starred: number; notes: number };
 }
 
 function sameRow(a: object, b: object): boolean {
@@ -120,6 +130,16 @@ function keep(view: ListView, before: Kept | null): Kept {
   return same ? before! : { view, items };
 }
 
+const sameNotes = (a: NoteRow[], b: NoteRow[]): boolean => a.length === b.length && a.every((note, i) => note === b[i]);
+
+/** Puts the arrays of the view before into the new view where nothing changed, as `keep` does for a list. */
+function keepNotes(view: NotesView, before: NotesView | undefined): NotesView {
+  if (!before) return view;
+  const pinned = sameNotes(view.pinned, before.pinned) ? before.pinned : view.pinned;
+  const others = sameNotes(view.others, before.others) ? before.others : view.others;
+  return pinned === before.pinned && others === before.others ? before : { pinned, others };
+}
+
 export function createRowStore(input: {
   locale: string;
   /** The two are read in a view, so they must be reactive. */
@@ -128,7 +148,7 @@ export function createRowStore(input: {
 }): RowStore {
   const rows = emptyRows();
   const cells = new Map<ID, Cell>();
-  const builds = { list: 0, starred: 0 };
+  const builds = { list: 0, starred: 0, notes: 0 };
 
   /** Changes when a list row changes, comes, or goes. */
   let listsRev = $state(0);
@@ -138,14 +158,19 @@ export function createRowStore(input: {
   let starsRev = $state(0);
   /** Changes when a list gets its counters. For a reader of a list that is not there. */
   let cellsRev = $state(0);
+  /** Changes when a note changes, comes, or goes. No list or task reader reads it. */
+  let notesRev = $state(0);
 
   let ordered: { rev: number; lists: ListRow[] } | null = null;
   let starred: (Kept & { lists: number; stars: number; today: DateStr; sort: StarredSort }) | null = null;
+  /** By the archive flag and the words of the query. The order of the Map is the order of use. */
+  const notesViews = new Map<string, { rev: number; view: NotesView }>();
 
   // What one change touched. `settle` tells the readers at its end.
   let dirtyLists = new Set<ID>();
   let dirtyCells = new Set<Cell>();
   let starsMoved = false;
+  let notesMoved = false;
 
   // A reader does not make a cell: a counter that is made in a reader is not a dependency of
   // that reader. So a cell is made here, at a change, and a reader of a list with no cell depends
@@ -183,6 +208,8 @@ export function createRowStore(input: {
 
   /** Tells the readers what changed. One time for each batch of changes. */
   function settle(): void {
+    if (notesMoved) notesRev += 1;
+    notesMoved = false;
     if (dirtyLists.size === 0 && dirtyCells.size === 0) return;
     for (const id of dirtyLists) cellOf(id).row += 1;
     if (dirtyLists.size > 0) listsRev += 1;
@@ -197,12 +224,14 @@ export function createRowStore(input: {
     starsMoved = false;
   }
 
-  function load({ lists, tasks }: { lists: readonly ListRow[]; tasks: readonly TaskRow[] }): void {
+  function load({ lists, tasks, notes }: { lists: readonly ListRow[]; tasks: readonly TaskRow[]; notes: readonly NoteRow[] }): void {
     untrack(() => {
       for (const id of rows.lists.keys()) dirtyLists.add(id);
       for (const task of rows.tasks.values()) indexTask(task, undefined);
+      notesMoved = rows.notes.size > 0 || notes.length > 0;
       rows.lists.clear();
       rows.tasks.clear();
+      rows.notes.clear();
       for (const list of lists) {
         rows.lists.set(list.id, list);
         dirtyLists.add(list.id);
@@ -211,6 +240,7 @@ export function createRowStore(input: {
         rows.tasks.set(task.id, task);
         indexTask(undefined, task);
       }
+      for (const note of notes) rows.notes.set(note.id, note);
       settle();
     });
   }
@@ -220,6 +250,7 @@ export function createRowStore(input: {
       const applied: Put[] = [];
       const lists = new Set<ID>();
       const tasks = new Set<ID>();
+      const notes = new Set<ID>();
       for (const put of puts) {
         if (put.kind === 'list') {
           const old = rows.lists.get(put.id);
@@ -228,6 +259,12 @@ export function createRowStore(input: {
           if (next === null || next === old) continue;
           dirtyLists.add(put.id);
           lists.add(put.id);
+        } else if (put.kind === 'note') {
+          const old = rows.notes.get(put.id);
+          const next = applyPut(rows, put);
+          if (next === null || next === old) continue;
+          notesMoved = true;
+          notes.add(put.id);
         } else {
           const old = rows.tasks.get(put.id);
           const next = applyPut(rows, put);
@@ -238,13 +275,13 @@ export function createRowStore(input: {
         applied.push(put);
       }
       settle();
-      return { applied, changed: { lists: [...lists], tasks: [...tasks] } };
+      return { applied, changed: { lists: [...lists], tasks: [...tasks], notes: [...notes] } };
     });
   }
 
   function replace(changes: RowChanges): Changed {
     return untrack(() => {
-      const changed: Changed = { lists: [], tasks: [] };
+      const changed: Changed = { lists: [], tasks: [], notes: [] };
       for (const [id, next] of changes.lists) {
         const old = rows.lists.get(id);
         if (next ? old !== undefined && sameRow(next, old) : old === undefined) continue;
@@ -260,6 +297,14 @@ export function createRowStore(input: {
         else rows.tasks.delete(id);
         indexTask(old, next ?? undefined);
         changed.tasks.push(id);
+      }
+      for (const [id, next] of changes.notes) {
+        const old = rows.notes.get(id);
+        if (next ? old !== undefined && sameRow(next, old) : old === undefined) continue;
+        if (next) rows.notes.set(id, next);
+        else rows.notes.delete(id);
+        notesMoved = true;
+        changed.notes.push(id);
       }
       settle();
       return changed;
@@ -349,10 +394,47 @@ export function createRowStore(input: {
     return parent.completed ? subtasks.filter((task) => task.completed) : subtasks;
   }
 
+  function getNote(id: ID): NoteRow | undefined {
+    void notesRev;
+    const note = rows.notes.get(id);
+    return note && !note.deleted ? note : undefined;
+  }
+
+  function notesView({ archived, query }: { archived: boolean; query: string }): NotesView {
+    const rev = notesRev;
+    // The view of "milk" and of "milk " is the same, so a space that the person types builds nothing.
+    const words = query.trim().split(/\s+/).join(' ');
+    const key = `${archived ? 'archive' : 'notes'}:${words}`;
+    const hit = notesViews.get(key);
+    if (hit?.rev === rev) return hit.view;
+    builds.notes += 1;
+    const view = keepNotes(buildNotesView({ notes: rows.notes.values(), archived, query: words, locale: input.locale }), hit?.view);
+    notesViews.delete(key);
+    notesViews.set(key, { rev, view });
+    if (notesViews.size > NOTES_VIEWS_MAX) notesViews.delete(notesViews.keys().next().value!);
+    return view;
+  }
+
   function watchAll(): void {
     void listsRev;
     void tasksRev;
+    void notesRev;
   }
 
-  return { rows, load, apply, replace, listsOrdered, getList, getTask, listView, starredView, subtasksOf, watchAll, builds };
+  return {
+    rows,
+    load,
+    apply,
+    replace,
+    listsOrdered,
+    getList,
+    getTask,
+    listView,
+    starredView,
+    subtasksOf,
+    getNote,
+    notesView,
+    watchAll,
+    builds,
+  };
 }

@@ -11,7 +11,7 @@ export interface Prefs {
    * `prefs.completedOpen = { ...prefs.completedOpen, [listId]: true }`.
    */
   completedOpen: Readonly<Record<ID, boolean>>;
-  /** A list id or 'starred'. null before the person selects a tab. */
+  /** A list id, 'starred', or 'notes'. null before the person selects a tab. */
   lastTab: string | null;
   sidebarOpen: boolean;
 }

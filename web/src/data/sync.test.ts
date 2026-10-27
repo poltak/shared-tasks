@@ -1,7 +1,7 @@
 // The data layer against the real server: `node server/main.ts` as a child process, and some
 // devices of two people that talk to it through HTTP.
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { ID } from '../../../shared/types.ts';
+import type { ID, NoteRow } from '../../../shared/types.ts';
 import { makeBrowser, makeDevice, startServerProcess, waitFor } from './testkit.ts';
 import type { Browser, Device, ServerProcess } from './testkit.ts';
 
@@ -32,6 +32,7 @@ const titlesOf = (made: Device, listId: ID): string[] =>
 const listTitles = (made: Device): string[] => made.layer.listsOrdered().map((list) => list.title);
 const defaultList = (made: Device): ID => made.layer.listsOrdered().find((list) => list.isDefault)!.id;
 const idle = (made: Device): boolean => made.layer.sync.status === 'idle' && made.layer.sync.pending === 0;
+const notesOf = (made: Device): NoteRow[] => [...made.layer.debug.rows.notes.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
 
 // Two devices of Ann and one device of Ben, for all tests of this file.
 let ann1: Device;
@@ -345,6 +346,154 @@ describe('two people', () => {
     // The change from before the sign-out reached the server.
     expect(await ben.layer.login({ name: 'ben', password: password('Ben') })).toEqual({ ok: true });
     expect(titlesOf(ben, defaultList(ben))).toEqual(['The last change before the sign-out']);
+  });
+});
+
+describe('notes', () => {
+  let note: ID;
+
+  it('brings a note from one device to the other, with the pin of the person on the two devices', async () => {
+    await waitFor(() => idle(ann1) && idle(ann2));
+    note = ann1.layer.actions.createNote({ title: 'Trip', body: 'Tickets', color: 'teal' }).puts[0]!.id;
+    await waitFor(() => ann2.layer.getNote(note) !== undefined, 3000);
+    expect(ann2.layer.getNote(note)).toEqual(ann1.layer.getNote(note));
+    expect(ann2.layer.getNote(note)).toMatchObject({ owner: ann1.layer.session.me!.id, editedBy: ann1.layer.session.me!.id, shared: false });
+
+    ann2.layer.actions.updateNote({ id: note, body: 'Tickets and passports' });
+    ann2.layer.actions.setNotePinned({ id: note, pinned: true });
+    await waitFor(() => ann1.layer.getNote(note)?.pinned === true && ann1.layer.getNote(note)?.body === 'Tickets and passports', 3000);
+    expect(ann1.layer.notesView({ archived: false, query: 'PASSPORTS' }).pinned.map((row) => row.id)).toEqual([note]);
+    // The other person does not see a note that is not shared.
+    await ben.layer.sync.now();
+    expect(ben.layer.getNote(note)).toBeUndefined();
+  });
+
+  it('shows a shared note to the other person, with the edits of each person and the pin and the archive of each person', async () => {
+    await waitFor(() => idle(ann1) && idle(ann2));
+    ann1.layer.actions.setNoteShared({ id: note, shared: true });
+    await waitFor(() => ben.layer.getNote(note) !== undefined, 3000);
+    expect(ben.layer.getNote(note)).toMatchObject({ title: 'Trip', shared: true, pinned: false, archived: false });
+    expect(ben.layer.store.can('deleteNote', { id: note })).toBe(false);
+    expect(ben.layer.store.can('setNoteShared', { id: note, shared: false })).toBe(false);
+
+    ben.layer.actions.updateNote({ id: note, title: 'Trip to Hue' });
+    ben.layer.actions.setNoteArchived({ id: note, archived: true });
+    await waitFor(() => ann1.layer.getNote(note)?.title === 'Trip to Hue', 3000);
+    expect(ann1.layer.getNote(note)).toMatchObject({ editedBy: ben.layer.session.me!.id, pinned: true, archived: false });
+    await waitFor(() => idle(ben));
+    expect(ben.layer.getNote(note)).toMatchObject({ title: 'Trip to Hue', pinned: false, archived: true });
+    await waitFor(() => ann2.layer.getNote(note)?.title === 'Trip to Hue', 3000);
+    expect(ann2.layer.getNote(note)).toEqual(ann1.layer.getNote(note));
+  });
+
+  it('takes a note away from the other person when the sharing stops, and rolls back the changes of that time', async () => {
+    await waitFor(() => idle(ben) && idle(ann1));
+    ben.setOnline(false);
+    ben.layer.actions.updateNote({ id: note, body: 'Changed by Ben with no network' });
+    ben.layer.actions.setNoteColor({ id: note, color: 'red' });
+    ann1.layer.actions.setNoteShared({ id: note, shared: false });
+    await waitFor(() => idle(ann1));
+
+    ben.setOnline(true);
+    await waitFor(() => idle(ben) && !ben.layer.debug.rows.notes.has(note), 3000);
+    expect(ben.layer.getNote(note)).toBeUndefined();
+    expect(ben.layer.toast.current).toMatchObject({ message: 'The server refused a change', undoable: false });
+    await ben.layer.debug.flush();
+    expect(ben.browser.storage.peek(ben.layer.session.me!.id)!.notes.map((row) => row.id)).not.toContain(note);
+    await ann1.layer.sync.now();
+    expect(ann1.layer.getNote(note)).toMatchObject({ title: 'Trip to Hue', body: 'Tickets and passports', color: 'teal', shared: false });
+  });
+
+  it('brings back a deleted note with "Undo" after the devices dropped the row', async () => {
+    await waitFor(() => idle(ann1) && idle(ann2));
+    const before = ann1.layer.getNote(note)!;
+    expect(ann1.layer.actions.deleteNote({ id: note }).message).toBe('Note deleted');
+    await waitFor(() => !ann1.layer.debug.rows.notes.has(note) && !ann2.layer.debug.rows.notes.has(note), 3000);
+    expect(ann1.layer.undo()).toBe(true);
+    expect(ann1.layer.getNote(note)).toEqual(before);
+    await waitFor(() => ann2.layer.getNote(note) !== undefined && idle(ann1), 3000);
+    expect(ann2.layer.getNote(note)).toEqual(before);
+    expect(ann1.layer.getNote(note)).toEqual(before);
+  });
+
+  it('makes tasks from a note and takes them back with "Undo" on each device', async () => {
+    const list = defaultList(ann1);
+    const id = ann1.layer.actions.createNote({ title: 'Beach', body: '- Swim goggles\n- [x] Charger\n- Sunscreen' }).puts[0]!.id;
+    expect(ann1.layer.actions.noteToTasks({ id, listId: list, mode: 'lines', archive: true }).message).toBe('2 tasks added to My Tasks');
+    await waitFor(() => titlesOf(ann2, list).slice(0, 2).join() === 'Swim goggles,Sunscreen' && ann2.layer.getNote(id)?.archived === true, 3000);
+    expect(ann2.layer.notesView({ archived: true, query: '' }).others.map((row) => row.id)).toContain(id);
+    ann1.layer.undo();
+    await waitFor(() => !titlesOf(ann2, list).includes('Swim goggles') && ann2.layer.getNote(id)?.archived === false, 3000);
+    expect(titlesOf(ann1, list)).not.toContain('Sunscreen');
+  });
+
+  it('gives a note that is archived or pinned, never both, after a pin and an archive on two devices with no network', async () => {
+    await waitFor(() => idle(ann1) && idle(ann2));
+    const id = ann1.layer.actions.createNote({ title: 'Packing list' }).puts[0]!.id;
+    await waitFor(() => ann2.layer.getNote(id) !== undefined && idle(ann1), 3000);
+    ann1.setOnline(false);
+    ann2.setOnline(false);
+    ann1.layer.actions.setNotePinned({ id, pinned: true });
+    // The archive is the later change, so it wins on the server for each of its two fields.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    ann2.layer.actions.setNoteArchived({ id, archived: true });
+    ann1.setOnline(true);
+    await waitFor(() => idle(ann1));
+    ann2.setOnline(true);
+    await waitFor(() => idle(ann2));
+    await ann1.layer.sync.now();
+    expect(ann1.layer.getNote(id)).toMatchObject({ pinned: false, archived: true });
+    expect(ann2.layer.getNote(id)).toMatchObject({ pinned: false, archived: true });
+  });
+
+  it('puts a note back in Pinned and not in the archive at the undo of an unpin after an archive on a different device', async () => {
+    await waitFor(() => idle(ann1) && idle(ann2));
+    const id = ann1.layer.actions.createNote({ title: 'Passport', pinned: true }).puts[0]!.id;
+    await waitFor(() => ann2.layer.getNote(id)?.pinned === true && idle(ann1), 3000);
+    ann1.layer.actions.setNotePinned({ id, pinned: false });
+    await waitFor(() => ann2.layer.getNote(id)?.pinned === false && idle(ann1), 3000);
+    ann2.layer.actions.setNoteArchived({ id, archived: true });
+    await waitFor(() => ann1.layer.getNote(id)?.archived === true && idle(ann2), 3000);
+    expect(ann1.layer.undo()).toBe(true);
+    await waitFor(() => ann2.layer.getNote(id)?.pinned === true && idle(ann1), 3000);
+    await ann2.layer.sync.now();
+    expect(ann1.layer.getNote(id)).toMatchObject({ pinned: true, archived: false });
+    expect(ann2.layer.getNote(id)).toMatchObject({ pinned: true, archived: false });
+    expect(ann2.layer.notesView({ archived: false, query: '' }).pinned.map((row) => row.id)).toContain(id);
+  });
+
+  it('gets the notes with one full sync on a device whose local database is from before notes', async () => {
+    await waitFor(() => idle(ann1) && idle(ann2));
+    const browser = ann2.browser;
+    const userId = ann2.layer.session.me!.id;
+    await ann2.layer.stop();
+    // The local database as the code from before notes left it: rows and a since, but no notes.
+    const saved = browser.storage.peek(userId)!;
+    expect(saved.notes.length).toBeGreaterThan(1);
+    expect(saved.meta.notesSynced).toBe(true);
+    const storage = await browser.storage.open(userId);
+    await storage.write({
+      clear: false,
+      lists: [],
+      listsGone: [],
+      tasks: [],
+      tasksGone: [],
+      notes: [],
+      notesGone: saved.notes.map((row) => row.id),
+      ops: [],
+      opsGone: [],
+      meta: { notesSynced: false },
+    });
+
+    ann2 = device({ browser });
+    await ann2.layer.start();
+    await waitFor(() => idle(ann2) && ann2.layer.debug.rows.notes.size === saved.notes.length, 3000);
+    // The notes are older than the since of the device, so only a request with since 0 gets them.
+    expect(notesOf(ann2)).toEqual(notesOf(ann1));
+    expect(ann2.delays).not.toContain(8000);
+    await ann2.layer.debug.flush();
+    expect(browser.storage.peek(userId)!.meta.notesSynced).toBe(true);
+    expect(browser.storage.peek(userId)!.notes.length).toBe(saved.notes.length);
   });
 });
 

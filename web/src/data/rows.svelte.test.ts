@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { defaultList, defaultTask } from '../../../shared/merge.ts';
-import type { ListRow, Put, StarredSort, TaskFields, TaskRow } from '../../../shared/types.ts';
+import { defaultList, defaultNote, defaultTask } from '../../../shared/merge.ts';
+import type { ListRow, NoteFields, NoteRow, Put, StarredSort, TaskFields, TaskRow } from '../../../shared/types.ts';
 import { createRowStore } from './rows.svelte.ts';
 import { flushSync, reactive, watch } from './watch.svelte.ts';
 
@@ -13,6 +13,16 @@ const task = (id: string, listId: string, fields: Partial<TaskRow> = {}): TaskRo
   ...fields,
 });
 const put = (id: string, fields: TaskFields): Put => ({ kind: 'task', id, fields });
+/** A note with a later createdAt for a later letter, so 'c' is before 'b' in the view. */
+const note = (id: string, fields: Partial<NoteRow> = {}): NoteRow => ({
+  ...defaultNote(id),
+  title: id,
+  owner: 'me',
+  createdAt: id.charCodeAt(0),
+  editedAt: id.charCodeAt(0),
+  ...fields,
+});
+const notePut = (id: string, fields: NoteFields): Put => ({ kind: 'note', id, fields });
 
 function setup() {
   let today = $state('2026-10-06');
@@ -21,6 +31,7 @@ function setup() {
   store.load({
     lists: [list('A'), list('B')],
     tasks: [task('a1', 'A'), task('a2', 'A'), task('a3', 'A', { completed: true, completedAt: 5 }), task('b1', 'B'), task('b2', 'B')],
+    notes: [],
   });
   return {
     store,
@@ -155,8 +166,9 @@ describe('objects that stay', () => {
     const changed = store.replace({
       lists: new Map([['A', { ...store.rows.lists.get('A')! }]]),
       tasks: new Map([['a1', { ...old, repeat: null }]]),
+      notes: new Map(),
     });
-    expect(changed).toEqual({ lists: [], tasks: [] });
+    expect(changed).toEqual({ lists: [], tasks: [], notes: [] });
     expect(store.rows.tasks.get('a1')).toBe(old);
     expect(store.listView('A')).toBe(view);
     expect(store.builds.list).toBe(1);
@@ -176,8 +188,9 @@ describe('objects that stay', () => {
         ['c1', task('c1', 'C')],
         ['never', null],
       ]),
+      notes: new Map(),
     });
-    expect(changed).toEqual({ lists: ['B', 'C'], tasks: ['a1', 'b1', 'b2', 'c1'] });
+    expect(changed).toEqual({ lists: ['B', 'C'], tasks: ['a1', 'b1', 'b2', 'c1'], notes: [] });
     expect(store.listsOrdered().map((row) => row.id)).toEqual(['A', 'C']);
     expect(titles(store, 'A')).toEqual(['server', 'a2']);
     expect(titles(store, 'C')).toEqual(['c1']);
@@ -197,7 +210,7 @@ describe('local puts', () => {
       put('new', { listId: 'B', title: 'new', pos: 'b9' }),
     ]);
     expect(result.applied.map((each) => each.id)).toEqual(['a2', 'B', 'new']);
-    expect(result.changed).toEqual({ lists: ['B'], tasks: ['a2', 'new'] });
+    expect(result.changed).toEqual({ lists: ['B'], tasks: ['a2', 'new'], notes: [] });
     expect(store.rows.tasks.has('not-there')).toBe(false);
     expect(store.rows.lists.has('no-list')).toBe(false);
   });
@@ -253,7 +266,7 @@ describe.runIf(reactive)('readers (only with the compiler output for a browser)'
     const lateView = watch(() => store.listView('C').openCount);
     expect([lateTask.value, lateList.value, lateView.value]).toEqual([undefined, undefined, 0]);
 
-    store.replace({ lists: new Map([['C', list('C')]]), tasks: new Map([['late', task('late', 'C')]]) });
+    store.replace({ lists: new Map([['C', list('C')]]), tasks: new Map([['late', task('late', 'C')]]), notes: new Map() });
     flushSync();
     expect(lateTask.value?.id).toBe('late');
     expect(lateList.value?.id).toBe('C');
@@ -354,9 +367,9 @@ describe('load', () => {
   it('replaces all rows', () => {
     const { store } = setup();
     store.listView('A');
-    store.load({ lists: [], tasks: [] });
+    store.load({ lists: [], tasks: [], notes: [] });
     expect([store.listView('A').openCount, store.listsOrdered().length, store.rows.tasks.size]).toEqual([0, 0, 0]);
-    store.load({ lists: [list('A')], tasks: [task('z', 'A', { starred: true })] });
+    store.load({ lists: [list('A')], tasks: [task('z', 'A', { starred: true })], notes: [] });
     expect([store.listView('A').openCount, store.listsOrdered().length, store.rows.tasks.size]).toEqual([1, 1, 1]);
     expect(store.starredView().openCount).toBe(1);
   });
@@ -365,12 +378,225 @@ describe('load', () => {
     const { store } = setup();
     const view = watch(() => store.listView('A').openCount);
     const lists = watch(() => store.listsOrdered().length);
-    store.load({ lists: [], tasks: [] });
+    store.load({ lists: [], tasks: [], notes: [] });
     flushSync();
     expect([view.value, lists.value]).toEqual([0, 0]);
-    store.load({ lists: [list('A')], tasks: [task('z', 'A')] });
+    store.load({ lists: [list('A')], tasks: [task('z', 'A')], notes: [] });
     flushSync();
     expect([view.value, lists.value]).toEqual([1, 1]);
     [view, lists].forEach((each) => each.stop());
+  });
+});
+
+describe('notes', () => {
+  function withNotes() {
+    const made = setup();
+    made.store.load({
+      lists: [list('A'), list('B')],
+      tasks: [task('a1', 'A'), task('b1', 'B', { starred: true, starredAt: 1 })],
+      notes: [
+        note('a'),
+        note('b', { pinned: true }),
+        note('c', { body: 'Milk and eggs' }),
+        note('d', { archived: true }),
+        note('e', { deleted: true }),
+      ],
+    });
+    return made;
+  }
+  const ids = (notes: NoteRow[]): string[] => notes.map((row) => row.id);
+
+  it('gives a note, and undefined for a note that is deleted or not there', () => {
+    const { store } = withNotes();
+    expect(store.getNote('a')).toBe(store.rows.notes.get('a'));
+    expect(store.getNote('e')).toBeUndefined();
+    expect(store.getNote('nope')).toBeUndefined();
+    store.apply([notePut('a', { deleted: true })]);
+    expect(store.getNote('a')).toBeUndefined();
+    store.apply([notePut('a', { deleted: false })]);
+    expect(store.getNote('a')?.title).toBe('a');
+  });
+
+  it('builds the notes view and the archive, and builds each one time for many reads', () => {
+    const { store } = withNotes();
+    const notes = store.notesView({ archived: false, query: '' });
+    expect([ids(notes.pinned), ids(notes.others)]).toEqual([['b'], ['c', 'a']]);
+    const archive = store.notesView({ archived: true, query: '' });
+    expect([ids(archive.pinned), ids(archive.others)]).toEqual([[], ['d']]);
+    expect(store.notesView({ archived: false, query: '' })).toBe(notes);
+    expect(store.notesView({ archived: true, query: '' })).toBe(archive);
+    expect(store.builds.notes).toBe(2);
+    expect(ids(store.notesView({ archived: false, query: 'MILK' }).others)).toEqual(['c']);
+    expect(store.builds.notes).toBe(3);
+  });
+
+  it('builds a search one time for the same words, also with more spaces', () => {
+    const { store } = withNotes();
+    const view = store.notesView({ archived: false, query: 'milk eggs' });
+    expect(ids(view.others)).toEqual(['c']);
+    expect(store.notesView({ archived: false, query: '  milk   eggs ' })).toBe(view);
+    expect(store.notesView({ archived: false, query: ' ' })).toBe(store.notesView({ archived: false, query: '' }));
+    expect(store.builds.notes).toBe(2);
+  });
+
+  it('keeps some inputs in the cache, and builds an input again after many other inputs', () => {
+    const { store } = withNotes();
+    const first = store.notesView({ archived: false, query: 'a' });
+    for (const query of ['b', 'c', 'd', 'e', 'f', 'g', 'h']) store.notesView({ archived: false, query });
+    expect(store.notesView({ archived: false, query: 'a' })).toBe(first);
+    expect(store.builds.notes).toBe(8);
+    store.notesView({ archived: false, query: 'i' });
+    store.notesView({ archived: false, query: 'j' });
+    store.notesView({ archived: false, query: 'b' });
+    expect(store.builds.notes).toBe(11);
+  });
+
+  it('builds the notes view again after a change of a note, and keeps the arrays that did not change', () => {
+    const { store } = withNotes();
+    const before = store.notesView({ archived: false, query: '' });
+    store.apply([notePut('a', { title: 'changed' })]);
+    const after = store.notesView({ archived: false, query: '' });
+    expect(after).not.toBe(before);
+    expect(after.pinned).toBe(before.pinned);
+    expect(after.others).not.toBe(before.others);
+    expect(after.others[1]!.title).toBe('changed');
+    // The row objects that did not change stay, so a keyed list updates only one card.
+    expect(after.others[0]).toBe(before.others[0]);
+    expect(store.builds.notes).toBe(2);
+
+    // A change of an archived note: the view is built again, but it has the same content.
+    store.apply([notePut('d', { color: 'red' })]);
+    expect(store.notesView({ archived: false, query: '' })).toBe(after);
+    expect(store.builds.notes).toBe(3);
+  });
+
+  it('builds no notes view for a change of a list or a task, and no list view for a change of a note', () => {
+    const { store } = withNotes();
+    const notes = store.notesView({ archived: false, query: '' });
+    store.apply([put('a1', { title: 'x' }), put('b1', { title: 'y' }), { kind: 'list', id: 'A', fields: { title: 'Aa' } }]);
+    expect(store.notesView({ archived: false, query: '' })).toBe(notes);
+    expect(store.builds.notes).toBe(1);
+
+    const views = { a: store.listView('A'), starred: store.starredView(), lists: store.listsOrdered() };
+    const builds = { ...store.builds };
+    store.apply([notePut('a', { title: 'z' }), notePut('new', { createdAt: 900, title: 'new', owner: 'me' })]);
+    store.replace({ lists: new Map(), tasks: new Map(), notes: new Map([['b', null]]) });
+    expect({ a: store.listView('A'), starred: store.starredView(), lists: store.listsOrdered() }).toEqual(views);
+    expect(store.listView('A')).toBe(views.a);
+    expect(store.starredView()).toBe(views.starred);
+    expect(store.listsOrdered()).toBe(views.lists);
+    expect([store.builds.list, store.builds.starred]).toEqual([builds.list, builds.starred]);
+    expect(ids(store.notesView({ archived: false, query: '' }).others)).toEqual(['new', 'c', 'a']);
+  });
+
+  it('gives only the note puts that changed a note, and makes a note only from a put with createdAt', () => {
+    const { store } = withNotes();
+    const result = store.apply([
+      notePut('a', { title: 'a' }),
+      notePut('late', { title: 'a change of a note that was dropped' }),
+      notePut('b', { color: 'teal' }),
+      notePut('made', { createdAt: 500, title: '', owner: 'me' }),
+    ]);
+    expect(result.applied.map((each) => each.id)).toEqual(['b', 'made']);
+    expect(result.changed).toEqual({ lists: [], tasks: [], notes: ['b', 'made'] });
+    expect(store.rows.notes.has('late')).toBe(false);
+    expect(store.getNote('made')?.title).toBe('');
+  });
+
+  it('writes the notes of the server, keeps the object of a note with the same values, and removes the notes that are gone', () => {
+    const { store } = withNotes();
+    const a = store.rows.notes.get('a')!;
+    const view = store.notesView({ archived: false, query: '' });
+    const changed = store.replace({
+      lists: new Map(),
+      tasks: new Map(),
+      notes: new Map<string, NoteRow | null>([
+        ['a', Object.fromEntries(Object.entries({ ...a }).reverse()) as unknown as NoteRow],
+        ['c', null],
+        ['f', note('f')],
+        ['never', null],
+      ]),
+    });
+    expect(changed).toEqual({ lists: [], tasks: [], notes: ['c', 'f'] });
+    expect(store.rows.notes.get('a')).toBe(a);
+    expect(store.rows.notes.has('c')).toBe(false);
+    const after = store.notesView({ archived: false, query: '' });
+    expect(after).not.toBe(view);
+    expect(ids(after.others)).toEqual(['f', 'a']);
+    expect(after.others[1]).toBe(a);
+
+    // Nothing changed: the view is not built again.
+    const builds = store.builds.notes;
+    store.replace({ lists: new Map(), tasks: new Map(), notes: new Map([['a', { ...a }]]) });
+    expect(store.notesView({ archived: false, query: '' })).toBe(after);
+    expect(store.builds.notes).toBe(builds);
+  });
+
+  it('replaces the notes at a load', () => {
+    const { store } = withNotes();
+    store.notesView({ archived: false, query: '' });
+    store.load({ lists: [], tasks: [], notes: [] });
+    expect(store.notesView({ archived: false, query: '' })).toEqual({ pinned: [], others: [] });
+    expect(store.getNote('a')).toBeUndefined();
+    store.load({ lists: [], tasks: [], notes: [note('z')] });
+    expect(ids(store.notesView({ archived: false, query: '' }).others)).toEqual(['z']);
+  });
+
+  describe.runIf(reactive)('readers (only with the compiler output for a browser)', () => {
+    it('runs the readers of notes for a change of a note, and no reader of a list or a task', () => {
+      const { store } = withNotes();
+      const notes = watch(() => store.notesView({ archived: false, query: '' }));
+      const archive = watch(() => store.notesView({ archived: true, query: '' }));
+      const one = watch(() => store.getNote('a'));
+      const listA = watch(() => store.listView('A'));
+      const starred = watch(() => store.starredView());
+      const lists = watch(() => store.listsOrdered());
+      const taskA = watch(() => store.getTask('a1'));
+      const listB = watch(() => store.getList('B'));
+      const missing = watch(() => store.getTask('nope'));
+
+      store.apply([notePut('a', { title: 'new title' })]);
+      flushSync();
+      expect([notes.runs, archive.runs, one.runs]).toEqual([2, 2, 2]);
+      expect(one.value?.title).toBe('new title');
+      expect(notes.value.others.map((row) => row.title)).toEqual(['c', 'new title']);
+      // The archive got the same object, so a component that shows it does nothing.
+      expect(archive.value).toBe(store.notesView({ archived: true, query: '' }));
+
+      store.replace({ lists: new Map(), tasks: new Map(), notes: new Map<string, NoteRow | null>([['f', note('f')], ['b', null]]) });
+      flushSync();
+      expect([notes.runs, archive.runs, one.runs]).toEqual([3, 3, 3]);
+      expect([listA.runs, starred.runs, lists.runs, taskA.runs, listB.runs, missing.runs]).toEqual([1, 1, 1, 1, 1, 1]);
+      [notes, archive, one, listA, starred, lists, taskA, listB, missing].forEach((each) => each.stop());
+    });
+
+    it('runs no reader of notes for a change of a list or a task', () => {
+      const { store } = withNotes();
+      const notes = watch(() => store.notesView({ archived: false, query: 'milk' }));
+      const one = watch(() => store.getNote('a'));
+      const missing = watch(() => store.getNote('nope'));
+      store.apply([put('a1', { title: 'x' }), put('b1', { starred: false }), { kind: 'list', id: 'B', fields: { title: 'Bee' } }]);
+      store.replace({
+        lists: new Map([['C', list('C')]]),
+        tasks: new Map<string, TaskRow | null>([
+          ['c1', task('c1', 'C')],
+          ['a1', null],
+        ]),
+        notes: new Map(),
+      });
+      flushSync();
+      expect([notes.runs, one.runs, missing.runs]).toEqual([1, 1, 1]);
+      [notes, one, missing].forEach((each) => each.stop());
+    });
+
+    it('tells the reader of a note that is not there when the note comes', () => {
+      const { store } = withNotes();
+      const late = watch(() => store.getNote('late')?.title);
+      expect(late.value).toBeUndefined();
+      store.replace({ lists: new Map(), tasks: new Map(), notes: new Map([['late', note('late')]]) });
+      flushSync();
+      expect(late.value).toBe('late');
+      late.stop();
+    });
   });
 });

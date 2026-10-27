@@ -2,7 +2,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as hlc from '../../../shared/hlc.ts';
 import { todayOf } from '../../../shared/dates.ts';
-import type { Op, RepeatRule, TaskRow } from '../../../shared/types.ts';
+import { defaultNote, defaultTask } from '../../../shared/merge.ts';
+import type { MeResponse, NoteRow, Op, RepeatRule, TaskRow } from '../../../shared/types.ts';
 import type { PushEnv, PushSubscriptionData } from './env.ts';
 import { PREFS_KEY } from './prefs.svelte.ts';
 import { fakeClock, makeBrowser, makeDevice, settle, stubServer } from './testkit.ts';
@@ -39,6 +40,11 @@ const syncCount = (server: StubServer): number => server.syncs.length;
 const lastOps = (server: StubServer): Op[] => server.syncs.at(-1)!.ops;
 const openTitles = (layer: Device['layer']): string[] =>
   layer.listView(LIST).groups.flatMap((group) => group.items.map((item) => item.task.title));
+const noteIds = (notes: NoteRow[]): string[] => notes.map((note) => note.id);
+const shownNotes = (layer: Device['layer'], archived = false): { pinned: string[]; others: string[] } => {
+  const view = layer.notesView({ archived, query: '' });
+  return { pinned: noteIds(view.pinned), others: noteIds(view.others) };
+};
 
 describe('start', () => {
   it('goes from loading to signedIn with the rows of the server', async () => {
@@ -56,8 +62,10 @@ describe('start', () => {
     expect(layer.getList(LIST)?.isDefault).toBe(true);
     expect(layer.sync.status).toBe('idle');
     expect(layer.sync.lastSyncedAt).toBe(clock.now());
-    expect(server.calls).toEqual(['GET /api/me', 'POST /api/sync']);
-    expect(server.syncs[0]!.since).toBe(0);
+    // The first answer has notes, and the device did not have the notes of the server. So the
+    // next request goes at once, for note ops that waited (SPEC.md section 4).
+    expect(server.calls).toEqual(['GET /api/me', 'POST /api/sync', 'POST /api/sync']);
+    expect(server.syncs.map((sync) => sync.since)).toEqual([0, 1]);
   });
 
   it('shows the sign-in screen when the server has no session', async () => {
@@ -247,9 +255,10 @@ describe('actions', () => {
     const { layer } = await boot();
     expect(Object.keys(layer.actions).sort()).toEqual(
       [
-        'clearCompleted', 'completeTask', 'createList', 'createTask', 'deleteList', 'deleteTask', 'indentTask',
-        'moveList', 'moveTask', 'moveToTop', 'renameList', 'setDate', 'setListHidden', 'setListShared', 'setListSort',
-        'setRepeat', 'setStar', 'uncompleteTask', 'unindentTask', 'updateTask',
+        'clearCompleted', 'completeTask', 'createList', 'createNote', 'createTask', 'deleteList', 'deleteNote',
+        'deleteTask', 'indentTask', 'moveList', 'moveTask', 'moveToTop', 'noteToTasks', 'renameList', 'setDate',
+        'setListHidden', 'setListShared', 'setListSort', 'setNoteArchived', 'setNoteColor', 'setNotePinned',
+        'setNoteShared', 'setRepeat', 'setStar', 'uncompleteTask', 'unindentTask', 'updateNote', 'updateTask',
       ],
     );
     const listId = layer.actions.createList({ title: 'Work' }).puts[0]!.id;
@@ -701,6 +710,8 @@ describe('local database', () => {
       listsGone: [],
       tasks: [{ ...row, title: 'old title', notes: '', starred: true }],
       tasksGone: [],
+      notes: [],
+      notesGone: [],
       ops: [],
       opsGone: [],
       meta: {},
@@ -972,11 +983,13 @@ describe('sync state', () => {
   it('makes no request with no network, and syncs when the network comes back', async () => {
     const { layer, server, clock, device: made } = await boot();
     const before = server.calls.length;
+    const tries = (): number => made.requests.filter((route) => route === '/api/sync').length;
+    const triesBefore = tries();
     made.setOnline(false);
     expect(layer.sync.status).toBe('offline');
     layer.actions.createTask({ listId: LIST, title: 'a' });
     await clock.advance(120_000);
-    expect(made.requests.filter((route) => route === '/api/sync').length).toBe(1);
+    expect(tries()).toBe(triesBefore);
     expect(server.calls.length).toBe(before);
     made.setOnline(true);
     await clock.advance(0);
@@ -1041,6 +1054,432 @@ describe('sync state', () => {
     await first.clock.advance(0);
     expect(second.layer.session.status).toBe('signedOut');
     expect(second.layer.listsOrdered()).toEqual([]);
+  });
+});
+
+describe('notes', () => {
+  it('makes a note at once, writes it to the local database, and sends it 50 ms later', async () => {
+    const { layer, server, clock, browser } = await boot();
+    const before = syncCount(server);
+    const result = layer.actions.createNote({ title: 'Groceries', body: 'Milk', color: 'yellow' });
+    const id = result.puts[0]!.id;
+    const mine = layer.getNote(id)!;
+    expect(mine).toMatchObject({
+      title: 'Groceries',
+      body: 'Milk',
+      color: 'yellow',
+      owner: 'user-1',
+      createdAt: clock.now(),
+      editedAt: clock.now(),
+      editedBy: 'user-1',
+      pinned: false,
+      archived: false,
+    });
+    expect(shownNotes(layer)).toEqual({ pinned: [], others: [id] });
+    expect([result.message, layer.toast.current, layer.canUndo(), layer.sync.pending]).toEqual([null, null, true, 1]);
+
+    await clock.advance(0);
+    const saved = browser.storage.peek('user-1')!;
+    expect(saved.notes).toEqual([mine]);
+    expect(saved.outbox).toMatchObject([{ kind: 'note', id, fields: { title: 'Groceries', createdAt: clock.now(), owner: 'user-1' } }]);
+
+    await clock.advance(49);
+    expect(syncCount(server)).toBe(before);
+    await clock.advance(1);
+    expect(lastOps(server)).toMatchObject([{ kind: 'note', id, fields: { title: 'Groceries', body: 'Milk' } }]);
+    expect(server.noteFor({ user: 'user-1', id })).toEqual(mine);
+    // The server sends the note back with the same values, so the device keeps its object.
+    expect(layer.getNote(id)).toBe(mine);
+    expect(layer.sync.pending).toBe(0);
+    await clock.advance(0);
+    expect(browser.storage.peek('user-1')!.outbox).toEqual([]);
+    expect(browser.storage.peek('user-1')!.notes).toEqual([mine]);
+  });
+
+  it('sends the text of a note 800 ms after the last key, as one op, and makes one undo step of a burst', async () => {
+    const { layer, server, clock } = await boot();
+    const id = layer.actions.createNote({ body: 'M' }).puts[0]!.id;
+    const created = layer.getNote(id)!;
+    await clock.advance(60);
+    const before = syncCount(server);
+
+    for (const body of ['Mi', 'Mil', 'Milk']) {
+      layer.actions.updateNote({ id, body });
+      await clock.advance(300);
+    }
+    layer.actions.updateNote({ id, title: 'Shop' });
+    expect(layer.getNote(id)).toMatchObject({ title: 'Shop', body: 'Milk', editedAt: clock.now(), editedBy: 'user-1' });
+    expect(layer.sync.pending).toBe(1);
+    await clock.advance(799);
+    expect(syncCount(server)).toBe(before);
+    await clock.advance(1);
+    expect(syncCount(server)).toBe(before + 1);
+    expect(lastOps(server)).toMatchObject([{ kind: 'note', id, fields: { title: 'Shop', body: 'Milk', editedBy: 'user-1' } }]);
+    expect(Object.keys(lastOps(server)[0]!.fields).sort()).toEqual(['body', 'editedAt', 'editedBy', 'title']);
+
+    // A color is not text, so it goes after 50 ms.
+    layer.actions.setNoteColor({ id, color: 'green' });
+    await clock.advance(50);
+    expect(syncCount(server)).toBe(before + 2);
+
+    layer.undo();
+    expect(layer.getNote(id)?.color).toBe('default');
+    layer.undo();
+    expect(layer.getNote(id)).toMatchObject({ title: '', body: 'M', editedAt: created.editedAt, editedBy: 'user-1' });
+    layer.undo();
+    expect(layer.getNote(id)).toBeUndefined();
+    expect(layer.canUndo()).toBe(false);
+  });
+
+  it('records no undo step for a discarded note, and forgets the steps of that note', async () => {
+    const { layer, server, clock } = await boot();
+    const task = layer.actions.createTask({ listId: LIST, title: 'before the note' }).puts[0]!.id;
+    const other = layer.actions.createNote({ title: 'A different note' }).puts[0]!.id;
+    // The editor makes the note at the first key. The person deletes the text again and closes it.
+    const id = layer.actions.createNote({ body: 'a' }).puts[0]!.id;
+    layer.actions.setNoteColor({ id, color: 'red' });
+    layer.actions.updateNote({ id, body: '' });
+    expect(layer.actions.deleteNote({ id, discard: true })).toMatchObject({ message: null, undo: [] });
+    expect(layer.getNote(id)).toBeUndefined();
+    expect(layer.toast.current).toBeNull();
+
+    // The next undo takes back the action from before the note.
+    expect(layer.undo()).toBe(true);
+    expect(layer.getNote(other)).toBeUndefined();
+    expect(layer.getNote(id)).toBeUndefined();
+    expect(layer.undo()).toBe(true);
+    expect(layer.getTask(task)).toBeUndefined();
+    expect(layer.canUndo()).toBe(false);
+
+    await clock.advance(60);
+    expect(server.notes.get(id)?.row.deleted).toBe(true);
+    expect(layer.debug.rows.notes.has(id)).toBe(false);
+  });
+
+  it('deletes a note with "Undo", also after the server dropped the row', async () => {
+    const { layer, server, clock } = await boot();
+    const id = layer.actions.createNote({ title: 'Trip', body: 'Tickets', color: 'teal' }).puts[0]!.id;
+    await clock.advance(60);
+    const before = layer.getNote(id)!;
+    expect(layer.actions.deleteNote({ id }).message).toBe('Note deleted');
+    expect(layer.toast.current).toMatchObject({ message: 'Note deleted', undoable: true });
+    expect(layer.getNote(id)).toBeUndefined();
+    await clock.advance(60);
+    // The server sends the id in `gone.notes`, and the device drops the row.
+    expect(layer.debug.rows.notes.has(id)).toBe(false);
+
+    expect(layer.undo()).toBe(true);
+    expect(layer.getNote(id)).toEqual(before);
+    await clock.advance(60);
+    expect(server.noteFor({ user: 'user-1', id })).toEqual(before);
+    expect(layer.getNote(id)).toEqual(before);
+  });
+
+  it('pins, archives, and makes tasks from a note, with one undo step for each', async () => {
+    const { layer, clock } = await boot();
+    const id = layer.actions.createNote({ title: 'Groceries', body: '- Milk\n- [x] Eggs\n- Bread' }).puts[0]!.id;
+    layer.actions.setNotePinned({ id, pinned: true });
+    expect(shownNotes(layer)).toEqual({ pinned: [id], others: [] });
+
+    const result = layer.actions.noteToTasks({ id, listId: LIST, mode: 'lines', archive: true });
+    expect(result.message).toBe('2 tasks added to My Tasks');
+    expect(layer.toast.current).toMatchObject({ message: '2 tasks added to My Tasks', undoable: true });
+    expect(openTitles(layer)).toEqual(['Milk', 'Bread']);
+    expect(layer.getNote(id)).toMatchObject({ archived: true, pinned: false });
+    expect(shownNotes(layer)).toEqual({ pinned: [], others: [] });
+    expect(shownNotes(layer, true)).toEqual({ pinned: [], others: [id] });
+
+    layer.undo();
+    expect(openTitles(layer)).toEqual([]);
+    expect(layer.getNote(id)).toMatchObject({ archived: false, pinned: true });
+    expect(layer.actions.setNoteArchived({ id, archived: true }).message).toBe('Note archived');
+    expect(layer.toast.current?.message).toBe('Note archived');
+    expect(layer.actions.setNotePinned({ id, pinned: true }).message).toBe('Note unarchived');
+    await clock.advance(60);
+    expect(layer.sync.pending).toBe(0);
+  });
+
+  it('tells that only the owner can delete or share a note', async () => {
+    const { layer, server } = await boot();
+    server.putNote({ user: 'user-2', id: 'theirs', fields: { createdAt: 5, title: 'From Sam', shared: true } });
+    await layer.sync.now();
+    expect(layer.getNote('theirs')).toMatchObject({ title: 'From Sam', owner: 'user-2', shared: true });
+    expect(layer.store.can('deleteNote', { id: 'theirs' })).toBe(false);
+    expect(layer.store.can('setNoteShared', { id: 'theirs', shared: false })).toBe(false);
+    expect(layer.store.can('setNoteColor', { id: 'theirs', color: 'red' })).toBe(true);
+    expect(layer.store.can('noteToTasks', { id: 'theirs', listId: LIST, mode: 'one' })).toBe(true);
+    expect(layer.actions.deleteNote({ id: 'theirs' }).puts).toEqual([]);
+    const mine = layer.actions.createNote({ title: 'Mine' }).puts[0]!.id;
+    expect(layer.store.can('deleteNote', { id: mine })).toBe(true);
+    expect(layer.store.can('setNoteShared', { id: mine, shared: true })).toBe(true);
+  });
+
+  it('gets the shared notes of the other person, their changes, and the end of the sharing', async () => {
+    const { layer, server, clock, browser } = await boot();
+    server.putNote({ user: 'user-2', id: 'trip', fields: { createdAt: 5, title: 'Trip', body: 'Tickets', shared: true, editedAt: 5, editedBy: 'user-2' } });
+    server.putNote({ user: 'user-2', id: 'private', fields: { createdAt: 6, title: 'Not for Alex' } });
+    await layer.sync.now();
+    expect(layer.getNote('trip')).toMatchObject({ title: 'Trip', owner: 'user-2', editedBy: 'user-2' });
+    expect(layer.getNote('private')).toBeUndefined();
+
+    server.putNote({ user: 'user-2', id: 'trip', fields: { body: 'Tickets and passports', editedAt: 9 } });
+    await layer.sync.now();
+    expect(layer.getNote('trip')?.body).toBe('Tickets and passports');
+    // A pin of the other person is for that person only.
+    server.putNote({ user: 'user-2', id: 'trip', fields: { pinned: true } });
+    layer.actions.setNoteArchived({ id: 'trip', archived: true });
+    await layer.sync.now();
+    expect(layer.getNote('trip')).toMatchObject({ pinned: false, archived: true });
+    expect(server.noteFor({ user: 'user-2', id: 'trip' })).toMatchObject({ pinned: true, archived: false });
+
+    server.putNote({ user: 'user-2', id: 'trip', fields: { shared: false } });
+    await layer.sync.now();
+    expect(layer.getNote('trip')).toBeUndefined();
+    expect(layer.debug.rows.notes.has('trip')).toBe(false);
+    await clock.advance(0);
+    expect(browser.storage.peek('user-1')!.notes).toEqual([]);
+  });
+
+  it('goes back to the note of the server for a rejected op, and tells the person', async () => {
+    const { layer, server, clock } = await boot();
+    server.putNote({ user: 'user-2', id: 'trip', fields: { createdAt: 5, title: 'Trip', shared: true } });
+    await layer.sync.now();
+    // The owner stops the sharing before the change of this device arrives.
+    server.putNote({ user: 'user-2', id: 'trip', fields: { shared: false } });
+    layer.actions.updateNote({ id: 'trip', title: 'Our trip' });
+    layer.actions.setNoteColor({ id: 'trip', color: 'red' });
+    await clock.advance(50);
+    expect(lastOps(server)).toMatchObject([{ kind: 'note', id: 'trip' }]);
+    expect(layer.debug.rows.notes.has('trip')).toBe(false);
+    expect(layer.sync.pending).toBe(0);
+    expect(layer.toast.current).toMatchObject({ message: 'The server refused a change', undoable: false });
+  });
+
+  it('replaces the notes for a reset with notes, and keeps them for a reset with no notes', async () => {
+    const { layer, server, clock, browser } = await boot();
+    const synced = layer.actions.createNote({ title: 'Synced' }).puts[0]!.id;
+    const lost = layer.actions.createNote({ title: 'Lost by the server' }).puts[0]!.id;
+    await clock.advance(60);
+    const waiting = layer.actions.createNote({ title: 'In the outbox' }).puts[0]!.id;
+    server.notes.delete(lost);
+    server.onSync = (request, response) => {
+      // The server lost the op: it is still in the outbox when the rows come.
+      response.acked = [];
+      expect(request.ops.map((op) => op.id)).toEqual([waiting]);
+      response.reset = true;
+      response.lists = [server.list];
+      response.notes = [{ ...server.noteFor({ user: 'user-1', id: synced })!, body: 'from the server' }];
+    };
+    await clock.advance(50);
+    server.onSync = null;
+    expect(layer.getNote(synced)?.body).toBe('from the server');
+    expect(layer.getNote(lost)).toBeUndefined();
+    expect(layer.getNote(waiting)?.title).toBe('In the outbox');
+    expect(layer.sync.pending).toBe(1);
+    await clock.advance(0);
+    expect(noteIds(browser.storage.peek('user-1')!.notes).sort()).toEqual([synced, waiting].sort());
+
+    // A server from before notes: the notes of the device are all that the device has of them.
+    await clock.advance(1000);
+    server.legacy = true;
+    server.onSync = (_request, response) => {
+      response.reset = true;
+      response.lists = [server.list];
+    };
+    const task = layer.actions.createTask({ listId: LIST, title: 'dropped by the reset' }).puts[0]!.id;
+    await layer.sync.now();
+    server.onSync = null;
+    expect(layer.getTask(task)).toBeUndefined();
+    expect([layer.getNote(synced)?.body, layer.getNote(waiting)?.title]).toEqual(['from the server', 'In the outbox']);
+    await clock.advance(0);
+    const saved = browser.storage.peek('user-1')!;
+    expect(noteIds(saved.notes).sort()).toEqual([synced, waiting].sort());
+    expect(saved.tasks).toEqual([]);
+    expect(saved.meta.notesSynced).toBe(false);
+  });
+
+  it('shows the notes after a restart from the local database, and asks only for the changes', async () => {
+    const first = await boot();
+    const id = first.layer.actions.createNote({ title: 'Kept', color: 'blue' }).puts[0]!.id;
+    first.layer.actions.setNotePinned({ id, pinned: true });
+    await first.clock.advance(60);
+    expect(first.browser.storage.peek('user-1')!.meta.notesSynced).toBe(true);
+    await first.layer.stop();
+
+    const next = device({ server: first.server, clock: first.clock, browser: first.browser });
+    next.hold();
+    const started = next.layer.start();
+    for (let i = 0; i < 5; i++) await settle();
+    expect(next.answered).toEqual([]);
+    expect(shownNotes(next.layer)).toEqual({ pinned: [id], others: [] });
+    expect(next.layer.getNote(id)?.color).toBe('blue');
+    const before = syncCount(first.server);
+    next.release();
+    await started;
+    expect(first.server.syncs.slice(before).map((sync) => sync.since > 0)).toEqual([true]);
+  });
+});
+
+describe('a server from before notes', () => {
+  it('holds the note ops, merges them, and sends them when a server with notes answers', async () => {
+    const clock = fakeClock();
+    const server = stubServer(clock.now);
+    server.legacy = true;
+    const { layer, browser } = await boot({ clock, server });
+    // The answer had no notes, so no request followed it.
+    expect(server.syncs.map((sync) => sync.since)).toEqual([0]);
+    expect(browser.storage.peek('user-1')!.meta.notesSynced ?? false).toBe(false);
+
+    const id = layer.actions.createNote({ title: 'An idea' }).puts[0]!.id;
+    const task = layer.actions.createTask({ listId: LIST, title: 'a task' }).puts[0]!.id;
+    await clock.advance(50);
+    // The task goes, and the note waits. The request does not send `since: 0` again.
+    expect(lastOps(server).map((op) => op.id)).toEqual([task]);
+    expect(server.syncs.at(-1)!.since).toBeGreaterThan(0);
+    expect(layer.sync.pending).toBe(1);
+    layer.actions.updateNote({ id, body: 'more' });
+    expect(layer.debug.outbox()).toMatchObject([{ kind: 'note', id, fields: { title: 'An idea', body: 'more', createdAt: expect.any(Number) } }]);
+    await clock.advance(800);
+    expect(lastOps(server)).toEqual([]);
+    expect(layer.toast.current).toBeNull();
+    expect(layer.getNote(id)?.body).toBe('more');
+    expect(layer.sync.pending).toBe(1);
+
+    // The server gets the notes. One round has the full sync and then the note op.
+    server.legacy = false;
+    server.putNote({ user: 'user-2', id: 'shared', fields: { createdAt: 3, title: 'From Sam', shared: true } });
+    let seen: NoteRow | undefined;
+    server.onSync = (request) => {
+      // The device has the answer of the full sync, and the note that waited is still there.
+      if (request.ops.some((op) => op.kind === 'note')) seen = layer.getNote(id);
+    };
+    const before = syncCount(server);
+    expect(await layer.sync.now()).toBe(true);
+    const round = server.syncs.slice(before);
+    expect(round.map((sync) => sync.since === 0)).toEqual([false, true, false]);
+    expect(round.map((sync) => sync.ops.map((op) => op.kind))).toEqual([[], [], ['note']]);
+    expect(seen?.body).toBe('more');
+    expect(layer.getNote('shared')?.title).toBe('From Sam');
+    expect(server.noteFor({ user: 'user-1', id })).toMatchObject({ title: 'An idea', body: 'more', owner: 'user-1' });
+    expect(layer.sync.pending).toBe(0);
+    await clock.advance(0);
+    expect(browser.storage.peek('user-1')!.meta.notesSynced).toBe(true);
+    expect(browser.storage.peek('user-1')!.outbox).toEqual([]);
+  });
+
+  it('keeps a note op that the server refused, with no message, and the next requests hold it', async () => {
+    const { layer, server, clock, browser } = await boot();
+    // The server goes back to the code from before notes.
+    server.legacy = true;
+    const id = layer.actions.createNote({ title: 'Refused' }).puts[0]!.id;
+    await clock.advance(50);
+    expect(lastOps(server).map((op) => op.kind)).toEqual(['note']);
+    expect(layer.toast.current).toBeNull();
+    expect(layer.sync.pending).toBe(1);
+    expect(layer.getNote(id)?.title).toBe('Refused');
+    expect(layer.debug.outbox()).toMatchObject([{ kind: 'note', id }]);
+    await clock.advance(0);
+    expect(browser.storage.peek('user-1')!.meta.notesSynced).toBe(false);
+    expect(browser.storage.peek('user-1')!.outbox.length).toBe(1);
+
+    // The op is not in a request now, so a later put merges into it.
+    layer.actions.updateNote({ id, body: 'later' });
+    expect(layer.debug.outbox()).toMatchObject([{ kind: 'note', id, fields: { title: 'Refused', body: 'later' } }]);
+    await clock.advance(800);
+    expect(lastOps(server)).toEqual([]);
+
+    // A refused task op still gives the message, and the note op does not count.
+    server.onSync = (request, response) => {
+      response.rejected = request.ops.map((op) => op.opId);
+      response.acked = [];
+    };
+    layer.actions.createTask({ listId: LIST, title: 'refused task' });
+    await clock.advance(50);
+    server.onSync = null;
+    expect(layer.toast.current?.message).toBe('The server refused a change');
+    expect(layer.debug.outbox().map((op) => op.kind)).toEqual(['note']);
+  });
+
+  it('gets all rows one time on a device from before notes, without the wait of a new device', async () => {
+    const clock = fakeClock();
+    const server = stubServer(clock.now);
+    // Notes that the code from before notes did not take. Their revisions are before its `since`.
+    server.putNote({ user: 'user-1', id: 'mine', fields: { createdAt: 3, title: 'Made on the phone', editedAt: 3, editedBy: 'user-1' } });
+    server.putNote({ user: 'user-2', id: 'theirs', fields: { createdAt: 4, title: 'From Sam', shared: true } });
+    // The stand-in starts at revision 1, so the two notes have the revisions 2 and 3.
+    const since = 3;
+
+    // The local database after the upgrade from version 1: rows and a since, no notesSynced. A
+    // note that the person made with no network waits in the outbox.
+    const browser = makeBrowser();
+    const storage = await browser.storage.open('user-1');
+    const task: TaskRow = { ...defaultTask('old-task'), listId: LIST, title: 'From before', createdAt: 1, createdBy: 'user-1' };
+    const removed: TaskRow = { ...task, id: 'removed', title: 'Deleted on the server', pos: 'a1' };
+    const offline: NoteRow = { ...defaultNote('offline'), title: 'Made with no network', owner: 'user-1', createdAt: 7, editedAt: 7, editedBy: 'user-1' };
+    const { id: _id, ...fields } = offline;
+    const op: Op = { kind: 'note', id: 'offline', fields, opId: 'op-1', ts: hlc.encode({ ...hlc.makeClock('client-1'), ms: 7 }) };
+    await storage.write({
+      clear: false,
+      lists: [server.list],
+      listsGone: [],
+      tasks: [task, removed],
+      tasksGone: [],
+      notes: [offline],
+      notesGone: [],
+      ops: [op],
+      opsGone: [],
+      meta: { since, clientId: 'client-1', me: server.me },
+    });
+    const session: MeResponse = { me: server.me, users: [server.me, server.other], canRegister: false, vapidPublicKey: 'k', version: '1' };
+    browser.kv.set('st.session', JSON.stringify(session));
+    server.onSync = (request, response) => {
+      if (request.since === 0) response.tasks = [task];
+    };
+
+    const made = device({ server, clock, browser });
+    made.hold();
+    const started = made.layer.start();
+    for (let i = 0; i < 5; i++) await settle();
+    // No wait as for a new device: the rows show before the network answers.
+    expect(made.layer.session.status).toBe('signedIn');
+    expect(made.answered).toEqual([]);
+    expect(made.delays).not.toContain(8000);
+    expect(openTitles(made.layer)).toEqual(['From before', 'Deleted on the server']);
+    expect(made.layer.getNote('offline')?.title).toBe('Made with no network');
+
+    made.release();
+    await started;
+    await clock.advance(0);
+    expect(server.syncs.map((sync) => [sync.since, sync.ops.map((each) => each.id)])).toEqual([
+      [0, []],
+      [since, ['offline']],
+    ]);
+    // The full sync replaced the rows, and the note that waited stayed.
+    expect(openTitles(made.layer)).toEqual(['From before']);
+    expect(shownNotes(made.layer)).toEqual({ pinned: [], others: ['offline', 'theirs', 'mine'] });
+    expect(server.noteFor({ user: 'user-1', id: 'offline' })).toMatchObject({ title: 'Made with no network', owner: 'user-1' });
+    expect(made.layer.sync.pending).toBe(0);
+    const saved = browser.storage.peek('user-1')!;
+    expect(saved.meta).toMatchObject({ notesSynced: true });
+    expect(saved.tasks.map((row) => row.id)).toEqual(['old-task']);
+    expect(saved.notes.map((row) => row.id).sort()).toEqual(['mine', 'offline', 'theirs']);
+    expect(saved.outbox).toEqual([]);
+  });
+
+  it('sends since 0 again on a new page while the notes are not synced, but not after an answer with no notes', async () => {
+    const clock = fakeClock();
+    const server = stubServer(clock.now);
+    server.legacy = true;
+    const first = await boot({ clock, server });
+    first.layer.actions.createTask({ listId: LIST, title: 'a' });
+    await clock.advance(60);
+    await first.layer.sync.now();
+    expect(server.syncs.map((sync) => sync.since === 0)).toEqual([true, false, false]);
+    await first.layer.stop();
+
+    const next = await boot({ clock, server, browser: first.browser });
+    await next.layer.sync.now();
+    expect(server.syncs.slice(3).map((sync) => sync.since === 0)).toEqual([true, false]);
   });
 });
 
@@ -1239,5 +1678,48 @@ describe.runIf(reactive)('readers (only with the compiler output for a browser)'
     expect([mine.runs, theirs.runs]).toEqual([1, 2]);
     expect(theirs.value.groups[0]!.items[0]!.task.title).toBe('changed by the other person');
     [mine, theirs].forEach((each) => each.stop());
+  });
+});
+
+describe.runIf(reactive)('readers of notes (only with the compiler output for a browser)', () => {
+  it('runs no list reader for a sync that brings a note, and no notes reader for a sync that brings a task', async () => {
+    const { layer, server, clock } = await boot();
+    const id = layer.actions.createTask({ listId: LIST, title: 'a' }).puts[0]!.id;
+    await clock.advance(60);
+    const list = watch(() => layer.listView(LIST));
+    const starred = watch(() => layer.starredView());
+    const task = watch(() => layer.getTask(id));
+    const notes = watch(() => layer.notesView({ archived: false, query: '' }));
+    const note = watch(() => layer.getNote('trip'));
+
+    server.putNote({ user: 'user-2', id: 'trip', fields: { createdAt: 5, title: 'Trip', shared: true } });
+    await layer.sync.now();
+    flushSync();
+    expect([list.runs, starred.runs, task.runs]).toEqual([1, 1, 1]);
+    expect([notes.runs, note.runs]).toEqual([2, 2]);
+    expect(note.value?.title).toBe('Trip');
+
+    const row = layer.getTask(id)!;
+    server.onSync = (_request, response) => void (response.tasks = [{ ...row, title: 'changed by the other person' }]);
+    await layer.sync.now();
+    server.onSync = null;
+    flushSync();
+    expect([list.runs, task.runs]).toEqual([2, 2]);
+    expect([notes.runs, note.runs]).toEqual([2, 2]);
+    [list, starred, task, notes, note].forEach((each) => each.stop());
+  });
+
+  it('tells the reader of store.can when a change of a note makes an action possible', async () => {
+    const { layer } = await boot();
+    const id = layer.actions.createNote({ title: 'x' }).puts[0]!.id;
+    const makeTasks = watch(() => layer.store.can('noteToTasks', { id, listId: LIST, mode: 'one' }));
+    expect(makeTasks.value).toBe(true);
+    layer.actions.updateNote({ id, title: ' ' });
+    flushSync();
+    expect(makeTasks.value).toBe(false);
+    layer.actions.updateNote({ id, body: 'Call mum' });
+    flushSync();
+    expect(makeTasks.value).toBe(true);
+    makeTasks.stop();
   });
 });

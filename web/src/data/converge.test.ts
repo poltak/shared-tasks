@@ -1,7 +1,8 @@
 // Random actions on three devices, with random times with no network. At the end each device
 // must show the same rows. The real server is in the middle.
 import { afterAll, expect, it } from 'vitest';
-import type { ID, ListRow, TaskRow } from '../../../shared/types.ts';
+import { NOTE_COLORS } from '../../../shared/types.ts';
+import type { ID, ListRow, NoteRow, TaskRow } from '../../../shared/types.ts';
 import { makeDevice, startServerProcess, waitFor } from './testkit.ts';
 import type { Device, ServerProcess } from './testkit.ts';
 
@@ -42,10 +43,31 @@ async function signedIn(input: { server: ServerProcess; name: string; register: 
 
 const DATES = ['2026-10-01', '2026-10-06', '2026-10-07', '2026-10-20', '2027-01-03'];
 
+/** One random action on a note that the device shows. */
+function actOnNote(made: Device, rng: ReturnType<typeof random>, serial: number): void {
+  const { layer } = made;
+  const { actions } = layer;
+  const note = rng.pick([...layer.debug.rows.notes.values()].filter((row) => !row.deleted));
+  const kind = rng.below(100);
+  if (kind < 20 || !note) {
+    actions.createNote({ title: rng.below(3) ? `Note ${serial}` : '', body: `Body ${serial}`, color: rng.pick(NOTE_COLORS), pinned: rng.below(4) === 0 });
+  } else if (kind < 40) actions.updateNote(rng.below(2) ? { id: note.id, title: `Title ${serial}` } : { id: note.id, body: `- Line ${serial}\n- More` });
+  else if (kind < 48) actions.setNoteColor({ id: note.id, color: rng.pick(NOTE_COLORS)! });
+  else if (kind < 58) actions.setNotePinned({ id: note.id, pinned: !note.pinned });
+  else if (kind < 68) actions.setNoteArchived({ id: note.id, archived: !note.archived });
+  else if (kind < 78) actions.setNoteShared({ id: note.id, shared: !note.shared });
+  else if (kind < 86) actions.deleteNote({ id: note.id, discard: rng.below(4) === 0 });
+  else if (kind < 94) {
+    const list = rng.pick(layer.listsOrdered());
+    if (list) actions.noteToTasks({ id: note.id, listId: list.id, mode: rng.below(2) ? 'one' : 'lines', archive: rng.below(2) === 0 });
+  } else layer.undo();
+}
+
 /** One random action on the device, on rows that the device shows. */
 function act(made: Device, rng: ReturnType<typeof random>, serial: number): void {
   const { layer } = made;
   const { actions } = layer;
+  if (rng.below(5) === 0) return actOnNote(made, rng, serial);
   const lists = layer.listsOrdered();
   const list = rng.pick(lists);
   if (!list) return;
@@ -108,6 +130,12 @@ const sharedPart = (row: TaskRow | ListRow): Record<string, unknown> => {
 
 const sorted = <Row extends { id: ID }>(rows: Iterable<Row>): Row[] => [...rows].sort((a, b) => (a.id < b.id ? -1 : 1));
 
+/** The fields of a note that all people share. */
+const sharedNote = (note: NoteRow): Record<string, unknown> => {
+  const { pinned: _1, archived: _2, ...rest } = note;
+  return rest;
+};
+
 it.each([1, 2, 3])(
   'three devices show the same rows after random actions with and without the network (seed %i)',
   async (seed) => {
@@ -151,6 +179,10 @@ it.each([1, 2, 3])(
     expect(ann2.layer.listsOrdered().map((list) => list.id)).toEqual(ann1.layer.listsOrdered().map((list) => list.id));
     for (const list of ann1.layer.listsOrdered()) expect(ann2.layer.listView(list.id)).toEqual(ann1.layer.listView(list.id));
     expect(ann2.layer.starredView()).toEqual(ann1.layer.starredView());
+    expect(sorted(rows2.notes.values())).toEqual(sorted(rows1.notes.values()));
+    for (const archived of [false, true]) {
+      expect(ann2.layer.notesView({ archived, query: '' })).toEqual(ann1.layer.notesView({ archived, query: '' }));
+    }
 
     // The other person: the same shared lists, and the same shared values of their tasks.
     const benRows = ben.layer.debug.rows;
@@ -162,15 +194,26 @@ it.each([1, 2, 3])(
         .filter((task) => lists.some((list) => list.id === task.listId))
         .map(sharedPart);
     expect(inShared(benRows.tasks.values(), benShared)).toEqual(inShared(rows1.tasks.values(), annShared));
-    // Each person sees only the lists of that person and the shared lists.
+    // The other person: the same shared notes, with the same shared values.
+    const annNotes = sorted(rows1.notes.values()).filter((note) => note.shared);
+    expect(sorted(benRows.notes.values()).filter((note) => note.shared).map(sharedNote)).toEqual(annNotes.map(sharedNote));
+    // Each person sees only the lists and the notes of that person and the shared ones, and no deleted note.
     const mine = (made: Device): boolean => [...made.layer.debug.rows.lists.values()].every((list) => list.shared || list.owner === made.layer.session.me!.id);
     expect(all.map(mine)).toEqual([true, true, true]);
+    const myNotes = (made: Device): boolean =>
+      [...made.layer.debug.rows.notes.values()].every((note) => !note.deleted && (note.shared || note.owner === made.layer.session.me!.id));
+    expect(all.map(myNotes)).toEqual([true, true, true]);
+    // A pin and an archive on the two devices of Ann go out with their pair of values, so they do not mix.
+    const pinnedAndArchived = (made: Device): ID[] =>
+      [...made.layer.debug.rows.notes.values()].filter((note) => note.pinned && note.archived).map((note) => note.id);
+    expect(all.map(pinnedAndArchived)).toEqual([[], [], []]);
     // No row is left with no list.
     for (const made of all) {
       const { lists, tasks } = made.layer.debug.rows;
       expect([...tasks.values()].filter((task) => !lists.has(task.listId))).toEqual([]);
     }
     expect(rows1.tasks.size).toBeGreaterThan(10);
+    expect(rows1.notes.size + benRows.notes.size).toBeGreaterThan(3);
 
     // The local database of each device has the rows of its memory, and no op is left.
     for (const made of all) {
@@ -178,7 +221,9 @@ it.each([1, 2, 3])(
       const saved = made.browser.storage.peek(made.layer.session.me!.id)!;
       expect(sorted(saved.lists)).toEqual(sorted(made.layer.debug.rows.lists.values()));
       expect(sorted(saved.tasks)).toEqual(sorted(made.layer.debug.rows.tasks.values()));
+      expect(sorted(saved.notes)).toEqual(sorted(made.layer.debug.rows.notes.values()));
       expect(saved.outbox).toEqual([]);
+      expect(saved.meta.notesSynced).toBe(true);
     }
     await Promise.all(all.map((made) => made.layer.stop()));
   },

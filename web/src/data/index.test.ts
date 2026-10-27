@@ -4,9 +4,9 @@ import * as data from './index.ts';
 it('exports the names of SPEC.md section 7, and no other name', () => {
   expect(Object.keys(data).sort()).toEqual(
     [
-      'actions', 'canUndo', 'changePassword', 'getList', 'getTask', 'listView', 'listsOrdered', 'login', 'logout',
-      'otherUser', 'prefs', 'push', 'register', 'rename', 'session', 'starredView', 'store', 'subtasksOf', 'sync',
-      'toast', 'undo',
+      'actions', 'canUndo', 'changePassword', 'getList', 'getNote', 'getTask', 'listView', 'listsOrdered', 'login',
+      'logout', 'notesView', 'otherUser', 'prefs', 'push', 'register', 'rename', 'session', 'starredView', 'store',
+      'subtasksOf', 'sync', 'toast', 'undo',
     ],
   );
 });
@@ -19,6 +19,9 @@ it('can be imported with no browser, and does not start there', async () => {
   expect(data.starredView().openCount).toBe(0);
   expect(data.getTask('x')).toBeUndefined();
   expect(data.subtasksOf('x')).toEqual([]);
+  expect(data.getNote('x')).toBeUndefined();
+  expect(data.notesView({ archived: false, query: '' })).toEqual({ pinned: [], others: [] });
+  expect(data.actions.createNote({ title: 'x' }).puts).toEqual([]);
   expect(data.canUndo()).toBe(false);
   expect(data.undo()).toBe(false);
   expect(data.push.supported).toBe(false);

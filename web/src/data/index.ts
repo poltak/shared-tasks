@@ -7,10 +7,18 @@
 // - A row object never changes. A row that did not change is the same object after a sync or
 //   after a change of a different row, and a view keeps the items, groups, and arrays that did
 //   not change. So use keyed blocks: `{#each group.items as item (item.task.id)}`.
-// - `getList` and `getTask` give undefined for a row that is deleted or not there.
+// - `getList`, `getTask`, and `getNote` give undefined for a row that is deleted or not there.
+// - A change of a note runs only the readers of notes (`getNote`, `notesView`), and a change of a
+//   list or a task runs no reader of notes. A change of one note runs each reader of notes.
+// - `notesView({ archived, query })` is cached for each input. It keeps the `pinned` and `others`
+//   arrays, and the full view, when a change did not touch them: `{#each view.others as note (note.id)}`.
 // - An action changes the rows before it returns. Its result is the ActionResult of the shared
 //   logic: `puts[0].id` is the id of a new row, and no puts means that nothing happened.
 //   `store.can('indentTask', { id })` tells if an action is possible, and does not do it.
+// - `actions.updateNote` with only `id`, `title`, and `body` is typing, as `actions.updateTask`
+//   with only `id`, `title`, and `notes` is: the sync waits until 800 ms after the last key, and a
+//   burst of keys is one undo step. `actions.deleteNote({ id, discard: true })` records no undo
+//   step, and the steps of that note go from the undo list.
 // - `prefs.completedOpen` cannot be changed in place:
 //   `prefs.completedOpen = { ...prefs.completedOpen, [listId]: true }`.
 // - `toast.current.action`, if it is there, is a button of the caller (`label`, `run`).
@@ -40,6 +48,8 @@ export const {
   listView,
   starredView,
   subtasksOf,
+  getNote,
+  notesView,
   otherUser,
   actions,
   undo,

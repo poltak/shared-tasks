@@ -14,7 +14,7 @@ import type {
   MeResponse,
   Op,
   Put,
-  SyncResponse,
+  SyncAnswer,
   User,
 } from '../../../shared/types.ts';
 import type { Channel, Env, PokeStream, Signal } from './env.ts';
@@ -70,6 +70,15 @@ const NO_NETWORK = 'No connection to the server. Try again';
 
 const NOTHING: ActionResult = { puts: [], undo: [], message: null };
 
+/**
+ * The actions that are typing when the intent has only these fields and the id: the sync waits
+ * for the last key, and a burst of keys is one undo step.
+ */
+const TEXT_FIELDS: Partial<Record<string, readonly string[]>> = {
+  updateTask: ['title', 'notes'],
+  updateNote: ['title', 'body'],
+};
+
 interface Reply<T> {
   /** The HTTP status. 0: no answer. */
   status: number;
@@ -83,12 +92,13 @@ interface Dirt {
   clear: boolean;
   lists: Set<ID>;
   tasks: Set<ID>;
+  notes: Set<ID>;
   /** null: the op is not in the outbox now. */
   ops: Map<ID, Op | null>;
   meta: Record<string, unknown>;
 }
 
-const noDirt = (): Dirt => ({ clear: false, lists: new Set(), tasks: new Set(), ops: new Map(), meta: {} });
+const noDirt = (): Dirt => ({ clear: false, lists: new Set(), tasks: new Set(), notes: new Set(), ops: new Map(), meta: {} });
 
 /** The state of the account that is open on this device. */
 interface Account {
@@ -98,6 +108,11 @@ interface Account {
   clock: hlc.Clock;
   /** The revision of the last answer of the server. */
   since: number;
+  /**
+   * true when the notes of the device match the server. A device that ran the code from before
+   * notes moved `since` past the notes, and a server from before notes has none.
+   */
+  notesSynced: boolean;
   /** Server time minus device time. */
   offset: number;
   dirt: Dirt;
@@ -214,6 +229,8 @@ export function createDataLayer(env: Env) {
       listsGone: [],
       tasks: [],
       tasksGone: [],
+      notes: [],
+      notesGone: [],
       ops: [],
       opsGone: [],
       meta: dirt.meta,
@@ -228,12 +245,19 @@ export function createDataLayer(env: Env) {
       if (row) batch.tasks.push(row);
       else batch.tasksGone.push(id);
     }
+    for (const id of dirt.notes) {
+      const row = store.rows.notes.get(id);
+      if (row) batch.notes.push(row);
+      else batch.notesGone.push(id);
+    }
     for (const [id, op] of dirt.ops) {
       if (op) batch.ops.push(op);
       else batch.opsGone.push(id);
     }
     const empty =
-      !dirt.clear && dirt.lists.size === 0 && dirt.tasks.size === 0 && dirt.ops.size === 0 && Object.keys(dirt.meta).length === 0;
+      !dirt.clear &&
+      dirt.lists.size + dirt.tasks.size + dirt.notes.size + dirt.ops.size === 0 &&
+      Object.keys(dirt.meta).length === 0;
     acc.dirt = noDirt();
     // One write after the other: a later batch must not arrive before an earlier one.
     if (!empty) acc.writing = acc.writing.then(() => acc.storage.write(batch)).catch(warnStorage);
@@ -248,6 +272,7 @@ export function createDataLayer(env: Env) {
   function mark(acc: Account, changed: Changed): void {
     for (const id of changed.lists) acc.dirt.lists.add(id);
     for (const id of changed.tasks) acc.dirt.tasks.add(id);
+    for (const id of changed.notes) acc.dirt.notes.add(id);
   }
 
   // ---- Local changes ----
@@ -289,6 +314,17 @@ export function createDataLayer(env: Env) {
     undoCount = undoStack.length;
   }
 
+  /**
+   * For an action with no undo: a note that the editor made and the person emptied again. The
+   * steps that change only those rows go too, because an undo of them would change a row that the
+   * person threw away, and the person would see no result.
+   */
+  function forget(puts: readonly Put[]): void {
+    const rows = new Set(puts.map((put) => `${put.kind}:${put.id}`));
+    undoStack = undoStack.filter((entry) => !entry.puts.every((put) => rows.has(`${put.kind}:${put.id}`)));
+    undoCount = undoStack.length;
+  }
+
   type Run = (ctx: ActionContext, intent: never) => ActionResult;
 
   function perform(name: string, intent: { id?: ID }): ActionResult {
@@ -301,8 +337,10 @@ export function createDataLayer(env: Env) {
       const result = (shared[name as keyof typeof shared] as Run)(ctx, intent as never);
       if (result.puts.length === 0) return result;
       commit(acc, result.puts);
-      const typing = name === 'updateTask' && Object.keys(intent).every((key) => key === 'id' || key === 'title' || key === 'notes');
-      record(result.undo, typing ? `text:${intent.id}` : null);
+      const text = TEXT_FIELDS[name];
+      const typing = text !== undefined && Object.keys(intent).every((key) => key === 'id' || text.includes(key));
+      if (result.undo.length > 0) record(result.undo, typing ? `text:${intent.id}` : null);
+      else forget(result.puts);
       if (result.message) toast.show({ message: result.message, undoable: true });
       // "Undo" on the snackbar takes back the last action. A message of an older action must go.
       else if (toast.current?.undoable) toast.dismiss();
@@ -353,6 +391,13 @@ export function createDataLayer(env: Env) {
   let again = false;
   /** The body limit kept ops out of the last request. */
   let limited = false;
+  /**
+   * The last answer had notes, and the device did not have the notes of the server. The full sync
+   * and the note ops that wait for it go in the next request, and not at a later trigger.
+   */
+  let notesDue = false;
+  /** The last answer on this page came from a server from before notes. Each account of the page has the same server. */
+  let lackedNotes = false;
   /** The newest revision that a poke named. */
   let wantRev = 0;
   let failures = 0;
@@ -387,48 +432,77 @@ export function createDataLayer(env: Env) {
     }, ms);
   }
 
-  /** Writes the answer of the server into the rows, the outbox, and the local database. */
-  function receive({ acc, response, sentAt }: { acc: Account; response: SyncResponse; sentAt: number }): void {
-    const answered = new Set(outbox.remove([...response.acked, ...response.rejected]));
+  function setNotesSynced(acc: Account, value: boolean): void {
+    if (acc.notesSynced === value) return;
+    acc.notesSynced = value;
+    acc.dirt.meta.notesSynced = value;
+  }
+
+  /**
+   * Writes the answer of the server into the rows, the outbox, and the local database. `full`: the
+   * request sent `since: 0`, so the answer has all rows that the person can see.
+   */
+  function receive({ acc, answer, sentAt, full }: { acc: Account; answer: SyncAnswer; sentAt: number; full: boolean }): void {
+    // A server from before notes has no `notes`, and it refuses each note op. The note ops stay in
+    // the outbox for a server that knows notes, and they are not changes that the server refused.
+    const notes = Array.isArray(answer.notes) ? answer.notes : null;
+    const held = new Set(notes ? [] : outbox.all().flatMap((op) => (op.kind === 'note' ? [op.opId] : [])));
+    const named = [...answer.acked, ...answer.rejected].filter((id) => !held.has(id));
+    const answered = new Set(outbox.remove(named));
     for (const id of answered) acc.dirt.ops.set(id, null);
     // A server that names no op must not get the same ops again and again with no pause.
     if (answered.size === 0) limited = false;
 
-    const changes: RowChanges = { lists: new Map(), tasks: new Map() };
-    if (response.reset) {
+    const all = answer.reset || full;
+    const changes: RowChanges = { lists: new Map(), tasks: new Map(), notes: new Map() };
+    if (all) {
       for (const id of store.rows.lists.keys()) changes.lists.set(id, null);
       for (const id of store.rows.tasks.keys()) changes.tasks.set(id, null);
+      // With no notes in the answer, the notes of the device are all that the device has of them.
+      if (notes) for (const id of store.rows.notes.keys()) changes.notes.set(id, null);
     }
-    for (const row of response.lists) changes.lists.set(row.id, row);
-    for (const row of response.tasks) changes.tasks.set(row.id, row);
-    for (const id of response.gone.lists) changes.lists.set(id, null);
-    for (const id of response.gone.tasks) changes.tasks.set(id, null);
+    for (const row of answer.lists) changes.lists.set(row.id, row);
+    for (const row of answer.tasks) changes.tasks.set(row.id, row);
+    for (const row of notes ?? []) changes.notes.set(row.id, row);
+    for (const id of answer.gone.lists) changes.lists.set(id, null);
+    for (const id of answer.gone.tasks) changes.tasks.set(id, null);
+    for (const id of answer.gone.notes ?? []) changes.notes.set(id, null);
 
     // The server does not have the ops that are still in the outbox. They apply again over its
     // rows, on a copy: the screen then sees only the result, and a row that ends with the
     // values that it has keeps its object.
-    if (outbox.size > 0 && changes.lists.size + changes.tasks.size > 0) {
+    if (outbox.size > 0 && changes.lists.size + changes.tasks.size + changes.notes.size > 0) {
       const scratch = emptyRows();
       for (const [id, row] of changes.lists) if (row) scratch.lists.set(id, row);
       for (const [id, row] of changes.tasks) if (row) scratch.tasks.set(id, row);
+      for (const [id, row] of changes.notes) if (row) scratch.notes.set(id, row);
       for (const op of outbox.all()) {
         if (op.kind === 'list' && changes.lists.has(op.id)) changes.lists.set(op.id, applyPut(scratch, op));
         else if (op.kind === 'task' && changes.tasks.has(op.id)) changes.tasks.set(op.id, applyPut(scratch, op));
+        else if (op.kind === 'note' && changes.notes.has(op.id)) changes.notes.set(op.id, applyPut(scratch, op));
       }
     }
 
     mark(acc, store.replace(changes));
-    if (response.reset) {
+    if (all) {
+      // The database clears all its rows, and then gets the rows of the memory again.
       acc.dirt.clear = true;
-      mark(acc, { lists: [...store.rows.lists.keys()], tasks: [...store.rows.tasks.keys()] });
+      mark(acc, { lists: [...store.rows.lists.keys()], tasks: [...store.rows.tasks.keys()], notes: [...store.rows.notes.keys()] });
     }
 
+    // The first answer with notes starts the full sync. The answer of the full sync starts the
+    // request with the note ops that waited for it.
+    if (notes && !acc.notesSynced) notesDue = true;
+    lackedNotes = !notes;
+    if (!notes) setNotesSynced(acc, false);
+    else if (all) setNotesSynced(acc, true);
+
     const now = env.now();
-    if (response.rev !== acc.since) {
-      acc.since = response.rev;
-      acc.dirt.meta.since = response.rev;
+    if (answer.rev !== acc.since) {
+      acc.since = answer.rev;
+      acc.dirt.meta.since = answer.rev;
     }
-    const offset = Math.round(response.now - sentAt);
+    const offset = Math.round(answer.now - sentAt);
     if (Math.abs(offset - acc.offset) > CLOCK_SLACK_MS) {
       acc.offset = offset;
       acc.dirt.meta.offset = offset;
@@ -446,7 +520,7 @@ export function createDataLayer(env: Env) {
     if (answered.size > 0) {
       // The other tabs of this browser have the same client id, so the server sends them no poke.
       channel?.post({ type: 'synced', user: acc.userId });
-      const refused = response.rejected.filter((id) => answered.has(id)).length;
+      const refused = answer.rejected.filter((id) => answered.has(id)).length;
       if (refused > 0) {
         toast.show({ message: refused === 1 ? 'The server refused a change' : `The server refused ${refused} changes` });
       }
@@ -465,7 +539,11 @@ export function createDataLayer(env: Env) {
     const texts: string[] = [];
     let size = 0;
     limited = false;
+    notesDue = false;
     for (const op of outbox.all()) {
+      // A server from before notes refuses a note op. Until the device knows that the server has
+      // notes, the op waits in the outbox, where later puts still merge into it.
+      if (op.kind === 'note' && !acc.notesSynced) continue;
       const text = JSON.stringify(op);
       if (sent.length > 0 && size + text.length > MAX_BODY_CHARS) {
         limited = true;
@@ -476,11 +554,14 @@ export function createDataLayer(env: Env) {
       size += text.length;
     }
     outbox.freeze(sent);
-    const head = JSON.stringify({ clientId: acc.clientId, since: acc.since, tz: env.timeZone });
+    // The device must get all rows one time when its notes do not match the server. The stored
+    // `since` stays, so a start does not wait as a new device does.
+    const since = acc.notesSynced || lackedNotes ? acc.since : 0;
+    const head = JSON.stringify({ clientId: acc.clientId, since, tz: env.timeZone });
     const body = `${head.slice(0, -1)},"ops":[${texts.join(',')}]}`;
 
     const startedAt = env.now();
-    const reply = await call<SyncResponse>({
+    const reply = await call<SyncAnswer>({
       path: '/api/sync',
       body,
       timeout: SYNC_TIMEOUT_MS,
@@ -496,7 +577,7 @@ export function createDataLayer(env: Env) {
       return false;
     }
     // The server read its clock near the middle of the request.
-    receive({ acc, response: reply.data, sentAt: (startedAt + env.now()) / 2 });
+    receive({ acc, answer: reply.data, sentAt: (startedAt + env.now()) / 2, full: since === 0 });
     return true;
   }
 
@@ -543,9 +624,10 @@ export function createDataLayer(env: Env) {
     do {
       again = false;
       ok = await once(acc);
-      // One more request: a trigger came in the flight, ops are left, or a poke named a
-      // revision that the answer did not reach. A poke asks for one request only.
-      more = again || limited || wantRev > acc.since;
+      // One more request: a trigger came in the flight, ops are left, the notes need the full
+      // sync or have ops that waited for it, or a poke named a revision that the answer did not
+      // reach. A poke asks for one request only.
+      more = again || limited || notesDue || wantRev > acc.since;
       wantRev = 0;
     } while (ok && account === acc && more);
     return ok;
@@ -635,7 +717,7 @@ export function createDataLayer(env: Env) {
     again = false;
     failures = 0;
     wantRev = 0;
-    store.load({ lists: [], tasks: [] });
+    store.load({ lists: [], tasks: [], notes: [] });
     outbox.load([]);
     undoStack = [];
     undoCount = 0;
@@ -663,12 +745,16 @@ export function createDataLayer(env: Env) {
       const storage = await factory.open(userId);
       return { storage, snapshot: await storage.load() };
     };
+    const reading = read(env.storage);
     try {
-      // Some browsers have left a request to IndexedDB with no answer. The app must not wait
-      // on its start screen for that.
+      // Some browsers have left a request to IndexedDB with no answer, and a tab of the code from
+      // before can block the upgrade. The app must not wait on its start screen for that.
       const late = sleep(LOCAL_DB_WAIT_MS).then(() => Promise.reject(new Error('The local database did not answer')));
-      return await Promise.race([read(env.storage), late]);
+      return await Promise.race([reading, late]);
     } catch (error) {
+      // A database that opens after the limit is not used. Its connection must not block a
+      // later upgrade or the delete at sign-out.
+      reading.then(({ storage }) => storage.close()).catch(() => undefined);
       // A browser can also refuse IndexedDB. The app then works until the page closes.
       console.warn('Shared Tasks: no local database. The data stays in memory only', error);
       return read(memoryStorage());
@@ -695,6 +781,7 @@ export function createDataLayer(env: Env) {
       clientId,
       clock,
       since: num(meta.since),
+      notesSynced: meta.notesSynced === true,
       offset: num(meta.offset),
       dirt: noDirt(),
       flushTimer: null,
@@ -944,6 +1031,8 @@ export function createDataLayer(env: Env) {
     listView: store.listView,
     starredView: store.starredView,
     subtasksOf: store.subtasksOf,
+    getNote: store.getNote,
+    notesView: store.notesView,
     otherUser: (): User | null => users.find((user) => user.id !== me?.id) ?? null,
 
     actions,

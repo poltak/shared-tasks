@@ -4,7 +4,9 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import type { ID, ListRow, MeResponse, Op, SyncResponse, User } from '../../../shared/types.ts';
+import { defaultNote } from '../../../shared/merge.ts';
+import { LIMITS, NOTE_COLORS } from '../../../shared/types.ts';
+import type { ID, ListRow, MeResponse, NoteFields, NoteRow, Op, SyncAnswer, User } from '../../../shared/types.ts';
 import type { Env, PushEnv, Signal, Theme } from './env.ts';
 import { eventStreamOver } from './events.ts';
 import { createDataLayer } from './layer.svelte.ts';
@@ -77,11 +79,36 @@ export interface StubSync {
   chars: number;
 }
 
+/** A note on the stand-in server. The row has the shared fields. */
+export interface StubNote {
+  row: NoteRow;
+  /** The revision of the last change of a shared field. */
+  rev: number;
+  /** The per-person fields of each person. */
+  users: Map<ID, { pinned: boolean; archived: boolean }>;
+  /** The revision of the last change of the per-person fields of each person. */
+  userRevs: Map<ID, number>;
+  /** The revision at which each person stopped seeing the note. Only these people get its id in `gone`. */
+  lost: Map<ID, number>;
+}
+
 export interface StubServer {
   fetch(path: string, init?: RequestInit): Promise<Response>;
   me: User;
+  /** The second account. It has no device: a test makes its changes with `putNote`. */
+  other: User;
   /** The list that the first sync of a device gets. */
   list: ListRow;
+  notes: Map<ID, StubNote>;
+  /**
+   * true: the server is from before notes. It refuses each note op, and its answers have no
+   * `notes` and no `gone.notes`.
+   */
+  legacy: boolean;
+  /** Applies a note put of a person with the rules of SPEC.md section 4. true: the put was permitted. */
+  putNote(input: { user: ID; id: ID; fields: NoteFields }): boolean;
+  /** The note as the person sees it, or null if the person cannot see it. */
+  noteFor(input: { user: ID; id: ID }): NoteRow | null;
   /** Each request, for example 'POST /api/sync'. */
   calls: string[];
   /** The body of each request that had one, by path. The last one wins. */
@@ -92,15 +119,66 @@ export interface StubServer {
   /** A status: each request gets it. 0: each request fails as with no network. */
   down: number | null;
   /** Can change the answer of a sync before it goes out. */
-  onSync: ((request: StubSync, response: SyncResponse) => void) | null;
+  onSync: ((request: StubSync, response: SyncAnswer) => void) | null;
+}
+
+const NOTE_SHARED_FIELDS = ['title', 'body', 'color', 'shared', 'editedAt', 'editedBy', 'deleted'] as const;
+const NOTE_OWNER_FIELDS: readonly string[] = ['shared', 'deleted'];
+
+const isBool = (value: unknown): boolean => typeof value === 'boolean';
+const isText = (value: unknown): boolean => typeof value === 'string';
+const isStamp = (value: unknown): boolean => typeof value === 'number' && value >= 0 && value <= 8.64e15;
+const isIdValue = (value: unknown): boolean => typeof value === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(value);
+
+/** The checks of the real server (server/sync.ts) for each field of a note op. */
+const NOTE_CHECKS: Record<keyof NoteFields, (value: unknown) => boolean> = {
+  title: isText,
+  body: isText,
+  color: (value) => (NOTE_COLORS as readonly unknown[]).includes(value),
+  shared: isBool,
+  editedAt: isStamp,
+  editedBy: (value) => value === null || isIdValue(value),
+  deleted: isBool,
+  owner: isIdValue,
+  createdAt: isStamp,
+  pinned: isBool,
+  archived: isBool,
+};
+
+/** Cuts as the server does: half of a character pair at the end would be invalid text. */
+function cutText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const last = text.charCodeAt(max - 1);
+  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
 }
 
 /**
- * Answers as a server with one account and one list. It accepts each op, and it sends no rows
- * back after the first sync of a device: the tests of the local logic do not need more.
+ * The fields of a note op as the server keeps them, or null if a field has a wrong value: the
+ * server then refuses the full op. It cuts a text that is too long, and ignores an unknown field.
+ */
+function cleanNoteFields(fields: unknown): NoteFields | null {
+  if (typeof fields !== 'object' || fields === null || Array.isArray(fields)) return null;
+  const clean: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    const check = NOTE_CHECKS[key as keyof NoteFields] as ((value: unknown) => boolean) | undefined;
+    if (!check) continue;
+    if (!check(value)) return null;
+    clean[key] = key === 'title' || key === 'body' ? cutText(value as string, LIMITS[key === 'title' ? 'noteTitle' : 'noteBody']) : value;
+  }
+  for (const key of ['editedAt', 'createdAt']) if (typeof clean[key] === 'number') clean[key] = Math.round(clean[key]);
+  return clean as NoteFields;
+}
+
+/**
+ * Answers as a server with one account and one list. It accepts each list and task op, and it
+ * sends no list or task rows back after the first sync of a device: the tests of the local logic
+ * do not need more. Notes follow the rules of the real server: the owner, the visibility, the
+ * values, the per-person fields, and the rows and `gone` ids after `since`. Only the field
+ * timestamps are missing: a later op wins for each field it has.
  */
 export function stubServer(now: () => number = Date.now): StubServer {
   const me: User = { id: 'user-1', name: 'Alex' };
+  const other: User = { id: 'user-2', name: 'Sam' };
   const list: ListRow = {
     id: 'list-1',
     title: 'My Tasks',
@@ -118,14 +196,91 @@ export function stubServer(now: () => number = Date.now): StubServer {
     new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
   const info = (): MeResponse => ({
     me: stub.session ? me : null,
-    users: stub.session ? [me, { id: 'user-2', name: 'Sam' }] : [],
+    users: stub.session ? [me, other] : [],
     canRegister: false,
     vapidPublicKey: 'stub-key',
     version: '1.2.3',
   });
+  const sees = (note: StubNote, user: ID): boolean => !note.row.deleted && (note.row.owner === user || note.row.shared);
+
+  /** One op. A change of a value gives one new revision, as on the server. */
+  function applyNote({ user, id, fields }: { user: ID; id: ID; fields: unknown }): boolean {
+    const clean = cleanNoteFields(fields);
+    if (!clean) return false;
+    let note = stub.notes.get(id);
+    let made = false;
+    let shared: Record<string, unknown> = {};
+    for (const key of NOTE_SHARED_FIELDS) if (clean[key] !== undefined) shared[key] = clean[key];
+    if (!note) {
+      // Only the put that makes a note has createdAt.
+      if (clean.createdAt === undefined) return false;
+      const row: NoteRow = { ...defaultNote(id), editedAt: clean.createdAt, owner: user, createdAt: clean.createdAt };
+      note = { row, rev: 0, users: new Map(), userRevs: new Map(), lost: new Map() };
+      stub.notes.set(id, note);
+      made = true;
+    } else if (note.row.owner !== user) {
+      if (!note.row.shared) return false;
+      // Only the owner changes these. A value equal to the stored one is no change.
+      const row = note.row as unknown as Record<string, unknown>;
+      if (NOTE_OWNER_FIELDS.some((key) => key in shared && shared[key] !== row[key])) return false;
+      shared = Object.fromEntries(Object.entries(shared).filter(([key]) => !NOTE_OWNER_FIELDS.includes(key)));
+    }
+    const old = note.row as unknown as Record<string, unknown>;
+    const sharedChange = made || Object.entries(shared).some(([key, value]) => old[key] !== value);
+    const mine = note.users.get(user) ?? { pinned: false, archived: false };
+    const next = { pinned: clean.pinned ?? mine.pinned, archived: clean.archived ?? mine.archived };
+    const userChange = next.pinned !== mine.pinned || next.archived !== mine.archived;
+    if (!sharedChange && !userChange) return true;
+    rev += 1;
+    if (sharedChange) {
+      note.row = { ...note.row, ...(shared as Partial<NoteRow>) };
+      note.rev = rev;
+    }
+    if (userChange) {
+      note.users.set(user, next);
+      note.userRevs.set(user, rev);
+    }
+    return true;
+  }
+
+  /**
+   * The note ops of one request of a person. A person who could see a note at the start of the
+   * request and cannot see it at the end gets a `gone` mark. So a person who never saw a note
+   * never gets its id, as on the server.
+   */
+  function applyNotes({ user, puts }: { user: ID; puts: { id: ID; fields: unknown }[] }): boolean[] {
+    const people = [me.id, other.id];
+    const before = new Map<ID, ID[]>();
+    for (const { id } of puts) {
+      const note = stub.notes.get(id);
+      if (!before.has(id)) before.set(id, note ? people.filter((person) => sees(note, person)) : []);
+    }
+    const results = puts.map((put) => applyNote({ user, ...put }));
+    for (const [id, saw] of before) {
+      const note = stub.notes.get(id);
+      for (const person of saw) if (note && !sees(note, person)) note.lost.set(person, rev);
+    }
+    return results;
+  }
+
+  function putNote({ user, id, fields }: { user: ID; id: ID; fields: NoteFields }): boolean {
+    return applyNotes({ user, puts: [{ id, fields }] })[0]!;
+  }
+
+  function noteFor({ user, id }: { user: ID; id: ID }): NoteRow | null {
+    const note = stub.notes.get(id);
+    if (!note || !sees(note, user)) return null;
+    return { ...note.row, ...(note.users.get(user) ?? { pinned: false, archived: false }) };
+  }
+
   const stub: StubServer = {
     me,
+    other,
     list,
+    notes: new Map(),
+    legacy: false,
+    putNote,
+    noteFor,
     calls: [],
     bodies: {},
     syncs: [],
@@ -161,17 +316,43 @@ export function stubServer(now: () => number = Date.now): StubServer {
 
       const request = { ...(body as unknown as Omit<StubSync, 'chars'>), chars: text!.length };
       stub.syncs.push(request);
+      const { since } = request;
+      const acked: ID[] = [];
+      const rejected: ID[] = [];
+      const noteOps = stub.legacy ? [] : request.ops.filter((op) => op.kind === 'note');
+      const results = applyNotes({ user: me.id, puts: noteOps });
+      const okNote = new Map(noteOps.map((op, i) => [op.opId, results[i]!]));
+      // A server from before notes does not know the kind, so it refuses each note op.
+      for (const op of request.ops) (op.kind !== 'note' || okNote.get(op.opId) ? acked : rejected).push(op.opId);
+      // The device applied each of its ops. For a refused op and for a note that the person cannot
+      // see now (a delete), the device gets the true row or the id in `gone`, also for `since: 0`.
+      const stale = new Set(noteOps.filter((op) => !okNote.get(op.opId) || !noteFor({ user: me.id, id: op.id })).map((op) => op.id));
       if (request.ops.length > 0) rev += 1;
-      const response: SyncResponse = {
+      const response: SyncAnswer = {
         rev,
         reset: false,
-        lists: request.since === 0 ? [list] : [],
+        lists: since === 0 ? [list] : [],
         tasks: [],
         gone: { lists: [], tasks: [] },
-        acked: request.ops.map((op) => op.opId),
-        rejected: [],
+        acked,
+        rejected,
         now: now(),
       };
+      if (!stub.legacy) {
+        const notes: NoteRow[] = [];
+        const gone: ID[] = [];
+        for (const note of stub.notes.values()) {
+          const row = noteFor({ user: me.id, id: note.row.id });
+          const changed = since === 0 || note.rev > since || (note.userRevs.get(me.id) ?? 0) > since;
+          if (row && (changed || stale.has(note.row.id))) notes.push(row);
+          else if (!row && since !== 0 && (note.lost.get(me.id) ?? 0) > since) gone.push(note.row.id);
+        }
+        for (const id of stale) {
+          if (!noteFor({ user: me.id, id }) && !gone.includes(id)) gone.push(id);
+        }
+        response.notes = notes;
+        response.gone.notes = gone;
+      }
       stub.onSync?.(request, response);
       return json(response);
     },
