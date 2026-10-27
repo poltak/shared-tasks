@@ -3,8 +3,8 @@ import type { Db } from './db.ts';
 import { invalid } from './http.ts';
 import { timeZoneOf } from './scheduler.ts';
 import * as hlc from '../shared/hlc.ts';
-import { LIMITS } from '../shared/types.ts';
-import type { HLC, ID, ListRow, RepeatRule, SortMode, SyncResponse, TaskRow } from '../shared/types.ts';
+import { LIMITS, NOTE_COLORS } from '../shared/types.ts';
+import type { HLC, ID, ListRow, NoteColor, NoteRow, RepeatRule, SortMode, SyncResponse, TaskRow } from '../shared/types.ts';
 
 // ---------------------------------------------------------------------------------------------
 // Field checks. A check gives the value in the form that the database stores, or BAD.
@@ -21,6 +21,7 @@ const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 const SORTS: readonly string[] = ['my', 'date', 'deadline', 'starred', 'title'] satisfies SortMode[];
 const UNITS: readonly string[] = ['day', 'week', 'month', 'year'] satisfies RepeatRule['unit'][];
+const COLORS: readonly string[] = NOTE_COLORS;
 const POS_MAX = 1024;
 /** The largest time value of a JavaScript date. Larger numbers are not safe as a database integer. */
 const STAMP_MAX = 8.64e15;
@@ -93,13 +94,14 @@ const stamp: Check = (v) => (typeof v === 'number' && v >= 0 && v <= STAMP_MAX ?
 const count: Check = (v) => (isInt(v, 0, 1e9) ? v : BAD);
 const posKey: Check = (v) => (typeof v === 'string' && v.length <= POS_MAX ? v : BAD);
 const sortMode: Check = (v) => (typeof v === 'string' && SORTS.includes(v) ? v : BAD);
+const noteColor: Check = (v) => (typeof v === 'string' && COLORS.includes(v) ? v : BAD);
 const repeat: Check = (v) => {
   const rule = cleanRule(v);
   return rule ? JSON.stringify(rule) : BAD;
 };
 
 // ---------------------------------------------------------------------------------------------
-// The two kinds of row. Each has a table of shared fields and a table of per-person fields.
+// The three kinds of row. Each has a table of shared fields and a table of per-person fields.
 // ---------------------------------------------------------------------------------------------
 
 interface Field {
@@ -108,7 +110,7 @@ interface Field {
 }
 
 interface Kind {
-  name: 'list' | 'task';
+  name: 'list' | 'task' | 'note';
   /** Fields that all people share: field name to column. */
   shared: Map<string, Field>;
   /** Fields with a separate value for each person. */
@@ -208,6 +210,38 @@ const TASK = makeKind({
   userDefaults: { starred: 0, starred_at: null },
 });
 
+const NOTE = makeKind({
+  name: 'note',
+  table: 'notes',
+  userTable: 'note_user',
+  key: 'note_id',
+  shared: {
+    title: f('title', text(LIMITS.noteTitle)),
+    body: f('body', text(LIMITS.noteBody)),
+    color: f('color', noteColor),
+    shared: f('shared', bool),
+    editedAt: f('edited_at', stamp),
+    editedBy: f('edited_by', nullable(id)),
+    deleted: f('deleted', bool),
+  },
+  user: {
+    pinned: f('pinned', bool),
+    archived: f('archived', bool),
+  },
+  fixed: { owner: id, createdAt: stamp },
+  fixedCols: ['owner', 'created_at'],
+  userDefaults: { pinned: 0, archived: 0 },
+});
+
+const KINDS = new Map<unknown, Kind>([
+  ['list', LIST],
+  ['task', TASK],
+  ['note', NOTE],
+]);
+
+/** The shared fields of a note that only the owner changes. */
+const OWNER_ONLY: ReadonlySet<string> = new Set(['shared', 'deleted']);
+
 interface FieldValue {
   name: string;
   col: string;
@@ -258,6 +292,8 @@ const LOST_LIST = `INSERT INTO list_user (list_id, user_id, lost_rev) VALUES (?,
   ON CONFLICT(list_id, user_id) DO UPDATE SET lost_rev = excluded.lost_rev`;
 const LOST_TASK = `INSERT INTO task_user (task_id, user_id, lost_rev) VALUES (?, ?, ?)
   ON CONFLICT(task_id, user_id) DO UPDATE SET lost_rev = excluded.lost_rev`;
+const LOST_NOTE = `INSERT INTO note_user (note_id, user_id, lost_rev) VALUES (?, ?, ?)
+  ON CONFLICT(note_id, user_id) DO UPDATE SET lost_rev = excluded.lost_rev`;
 // Only the tasks that the request did not change: a changed task gets its mark by itself.
 const LOST_TASKS_OF_LIST = `INSERT INTO task_user (task_id, user_id, lost_rev)
   SELECT id, ?, ? FROM tasks WHERE list_id = ? AND deleted = 0 AND rev <= ?
@@ -271,7 +307,7 @@ export interface ApplyResult {
    * op, a row where a newer value of a different device stays, and a row that the person cannot see.
    * The caller sends their true state.
    */
-  stale: { kind: 'list' | 'task'; id: ID }[];
+  stale: { kind: Kind['name']; id: ID }[];
   /** The revision counter after the ops. */
   rev: number;
   /** The people whose devices must sync. null if no row changed. */
@@ -308,6 +344,7 @@ export function applyOps(input: {
   const listsBefore = new Map<ID, Raw | null>();
   const tasksBefore = new Map<ID, { listId: ID; deleted: Value } | null>();
   const tasksNow = new Map<ID, { listId: ID; deleted: Value }>();
+  const notesBefore = new Map<ID, Raw | null>();
 
   // The list rows that this request read. A request with many tasks of one list reads the list one time.
   const lists = new Map<ID, Raw | null>();
@@ -321,9 +358,10 @@ export function applyOps(input: {
   };
 
   const canSee = (list: Raw): boolean => list.owner === userId || list.shared === 1;
-  const touch = (list: Raw): void => {
-    if (list.shared === 1) pokeAll = true;
-    else poke.add(list.owner as ID);
+  /** A list or a note changed: the people who can see it must sync. */
+  const touch = (row: Raw): void => {
+    if (row.shared === 1) pokeAll = true;
+    else poke.add(row.owner as ID);
   };
 
   /** Writes the newer fields into the row. 0: nothing. 1: only timestamps changed. 2: a value changed. */
@@ -495,8 +533,67 @@ export function applyOps(input: {
     return true;
   }
 
-  const sees = (list: Raw | null, user: ID): boolean =>
-    list !== null && list.deleted === 0 && (list.owner === user || list.shared === 1);
+  function applyNote(noteId: ID, parsed: Parsed, ts: HLC): boolean {
+    let row = (db.q(NOTE.select).get(noteId) as Raw | undefined) ?? null;
+    if (!row) {
+      // Only the put that makes a note has createdAt. A title can be empty and each typed key
+      // sends the title, so no text field can mark a new note. A put with no createdAt is a change
+      // of a note that the server removed, and that note must not come back as an empty row.
+      if (parsed.createdAt === null) return false;
+      // The keys are exactly the columns: node:sqlite refuses a named value that the SQL does not have.
+      row = {
+        id: noteId,
+        title: '',
+        body: '',
+        color: 'default',
+        shared: 0,
+        edited_at: parsed.createdAt,
+        edited_by: null,
+        deleted: 0,
+        owner: userId,
+        created_at: parsed.createdAt,
+        rev: nextRev(),
+        ts: '{}',
+        at: now,
+      };
+      merge(row, parsed.shared, ts);
+      db.q(NOTE.insert).run(row);
+      if (!notesBefore.has(noteId)) notesBefore.set(noteId, null);
+      touch(row);
+    } else {
+      const current = row;
+      const mine = current.owner === userId;
+      if (!mine && current.shared !== 1) return false;
+      let values = parsed.shared;
+      if (!mine) {
+        // Only the owner changes 'shared' and 'deleted'. A value equal to the stored one is no change.
+        if (values.some((v) => OWNER_ONLY.has(v.name) && v.value !== current[v.col])) return false;
+        values = values.filter((v) => !OWNER_ONLY.has(v.name));
+      }
+      const before: Raw = { owner: current.owner!, shared: current.shared!, deleted: current.deleted! };
+      const result = merge(current, values, ts);
+      if (result === 2) {
+        current.rev = nextRev();
+        current.at = now;
+      }
+      if (result) db.q(NOTE.update).run(current);
+      if (result === 2) {
+        // The end of a share must reach the person who loses the note.
+        if (before.shared === 1) pokeAll = true;
+        touch(current);
+        if ((current.shared !== before.shared || current.deleted !== before.deleted) && !notesBefore.has(noteId)) {
+          notesBefore.set(noteId, before);
+        }
+      }
+    }
+    mergeUserPart(NOTE, noteId, parsed.user, ts);
+    // The person sees no deleted note, so the device must drop its row.
+    if (row.deleted !== 0) differs = true;
+    return true;
+  }
+
+  const sees = (row: Raw | null, user: ID): boolean =>
+    row !== null && row.deleted === 0 && (row.owner === user || row.shared === 1);
 
   /** Writes a 'gone' mark for each row that a person could see before the request and cannot see after it. */
   function markLost(): void {
@@ -531,6 +628,17 @@ export function applyOps(input: {
       // stays, so this does not move the cleanup of the deleted tasks of the list.
       if (before) db.q('UPDATE tasks SET rev = ? WHERE list_id = ?').run(rev, listId);
     }
+
+    // A note has no child rows, so only the note itself gets a mark.
+    for (const [noteId, before] of notesBefore) {
+      // No person saw a note that did not exist.
+      if (!before) continue;
+      const note = db.q('SELECT owner, shared, deleted FROM notes WHERE id = ?').get(noteId) as Raw | undefined;
+      if (!note || (before.shared === note.shared && before.deleted === note.deleted)) continue;
+      for (const user of users) {
+        if (sees(before, user) && !sees(note, user)) db.q(LOST_NOTE).run(noteId, user, rev);
+      }
+    }
   }
 
   // First the frame of each op is checked, in the order of the request.
@@ -550,7 +658,7 @@ export function applyOps(input: {
     const { opId, kind: kindName, id, ts, fields } = op as Record<string, unknown>;
     // An op with no usable id cannot be named in the answer, so it gets no answer.
     if (typeof opId !== 'string') return;
-    const kind = kindName === 'list' ? LIST : kindName === 'task' ? TASK : null;
+    const kind = KINDS.get(kindName) ?? null;
     const rowId = isId(id) ? id : null;
     const entry: Entry = { opId, kind, rowId, run: null, ok: false, stale: true };
     entries.push(entry);
@@ -565,12 +673,13 @@ export function applyOps(input: {
       clock.ms > now + FUTURE_LIMIT_MS
         ? hlc.encode({ ms: now, counter: Math.max(0, COUNTER_MAX - (input.ops.length - 1 - index)), node: clock.node })
         : ts;
-    entry.run = () => (kind === LIST ? applyList(rowId, parsed, stamp) : applyTask(rowId, parsed, stamp));
+    const apply = kind === LIST ? applyList : kind === TASK ? applyTask : applyNote;
+    entry.run = () => apply(rowId, parsed, stamp);
   });
 
-  // Then the lists, then the tasks. A device merges its puts for one row into one op, so the op
-  // that moves a task into a new list can come before the op that makes the list.
-  for (const kind of [LIST, TASK]) {
+  // Then the lists, then the tasks, then the notes. A device merges its puts for one row into one
+  // op, so the op that moves a task into a new list can come before the op that makes the list.
+  for (const kind of [LIST, TASK, NOTE]) {
     for (const entry of entries) {
       if (entry.kind !== kind || !entry.run) continue;
       const revBefore = rev;
@@ -592,7 +701,7 @@ export function applyOps(input: {
       }
     }
   }
-  if (listsBefore.size + tasksBefore.size > 0) markLost();
+  if (listsBefore.size + tasksBefore.size + notesBefore.size > 0) markLost();
 
   const acked: ID[] = [];
   const rejected: ID[] = [];
@@ -658,6 +767,21 @@ const GONE_TASKS = `SELECT tu.task_id AS id FROM task_user tu
     AND NOT EXISTS (SELECT 1 FROM tasks t JOIN lists l ON l.id = t.list_id
       WHERE t.id = tu.task_id AND t.deleted = 0 AND ${VISIBLE_LIST})`;
 
+const VISIBLE_NOTE = `n.deleted = 0 AND (n.owner = $user OR n.shared = 1)`;
+
+const NOTES = `SELECT n.id, n.title, n.body, n.color, n.shared, n.edited_at, n.edited_by, n.deleted, n.owner, n.created_at,
+    nu.pinned, nu.archived
+  FROM notes n LEFT JOIN note_user nu ON nu.note_id = n.id AND nu.user_id = $user
+  WHERE ${VISIBLE_NOTE}`;
+// The two inner queries each use an index, so the cost follows the number of changed rows.
+const NOTES_SINCE = `${NOTES} AND n.id IN (
+    SELECT id FROM notes WHERE rev > $since
+    UNION ALL SELECT note_id FROM note_user WHERE user_id = $user AND rev > $since)`;
+const NOTE_ONE = `${NOTES} AND n.id = $id`;
+const GONE_NOTES = `SELECT nu.note_id AS id FROM note_user nu
+  WHERE nu.user_id = $user AND nu.lost_rev > $since
+    AND NOT EXISTS (SELECT 1 FROM notes n WHERE n.id = nu.note_id AND ${VISIBLE_NOTE})`;
+
 function listOut(r: Raw): ListRow {
   return {
     id: r.id as ID,
@@ -697,6 +821,23 @@ function taskOut(r: Raw): TaskRow {
     deleted: r.deleted === 1,
     starred: r.starred === 1,
     starredAt: (r.starred_at ?? null) as number | null,
+  };
+}
+
+function noteOut(r: Raw): NoteRow {
+  return {
+    id: r.id as ID,
+    title: r.title as string,
+    body: r.body as string,
+    color: r.color as NoteColor,
+    shared: r.shared === 1,
+    editedAt: r.edited_at as number,
+    editedBy: r.edited_by as ID | null,
+    deleted: r.deleted === 1,
+    owner: r.owner as ID,
+    createdAt: r.created_at as number,
+    pinned: r.pinned === 1,
+    archived: r.archived === 1,
   };
 }
 
@@ -745,32 +886,42 @@ export function runSync(input: {
     const full = reset || since === 0;
 
     const user = userId;
-    const listRows = (full ? db.q(LISTS).all({ user }) : db.q(LISTS_SINCE).all({ user, since })) as Raw[];
-    const taskRows = (full ? db.q(TASKS).all({ user }) : db.q(TASKS_SINCE).all({ user, since })) as Raw[];
-    const lists = listRows.map(listOut);
-    const tasks = taskRows.map(taskOut);
-    const ids = (text: string): ID[] => (db.q(text).all({ user, since }) as { id: ID }[]).map((r) => r.id);
-    const gone = full ? { lists: [], tasks: [] } : { lists: ids(GONE_LISTS), tasks: ids(GONE_TASKS) };
-
+    /** The rows and the gone ids of one kind for this person, and a way to add the true state of one row. */
+    const part = <T extends { id: ID }>(sql: { all: string; changed: string; one: string; gone: string; out: (r: Raw) => T }) => {
+      const rows = ((full ? db.q(sql.all).all({ user }) : db.q(sql.changed).all({ user, since })) as Raw[]).map(sql.out);
+      const gone: ID[] = full ? [] : (db.q(sql.gone).all({ user, since }) as { id: ID }[]).map((r) => r.id);
+      let done: Set<ID> | null = null;
+      const send = (id: ID): void => {
+        done ??= new Set([...rows.map((r) => r.id), ...gone]);
+        if (done.has(id)) return;
+        done.add(id);
+        const row = db.q(sql.one).get({ user, id }) as Raw | undefined;
+        if (row) rows.push(sql.out(row));
+        else gone.push(id);
+      };
+      return { rows, gone, send };
+    };
+    const parts = {
+      list: part({ all: LISTS, changed: LISTS_SINCE, one: LIST_ONE, gone: GONE_LISTS, out: listOut }),
+      task: part({ all: TASKS, changed: TASKS_SINCE, one: TASK_ONE, gone: GONE_TASKS, out: taskOut }),
+      note: part({ all: NOTES, changed: NOTES_SINCE, one: NOTE_ONE, gone: GONE_NOTES, out: noteOut }),
+    };
     // The device applied each of its ops already. Where that is not the state of the server, the
     // device gets the true row, or the id in 'gone', also if the row has no new revision.
-    if (applied.stale.length > 0) {
-      const done = {
-        list: new Set([...lists.map((l) => l.id), ...gone.lists]),
-        task: new Set([...tasks.map((t) => t.id), ...gone.tasks]),
-      };
-      for (const { kind, id } of applied.stale) {
-        if (done[kind].has(id)) continue;
-        done[kind].add(id);
-        const row = db.q(kind === 'list' ? LIST_ONE : TASK_ONE).get({ user, id }) as Raw | undefined;
-        if (!row) gone[kind === 'list' ? 'lists' : 'tasks'].push(id);
-        else if (kind === 'list') lists.push(listOut(row));
-        else tasks.push(taskOut(row));
-      }
-    }
+    for (const { kind, id } of applied.stale) parts[kind].send(id);
 
     return {
-      response: { rev, reset, lists, tasks, gone, acked: applied.acked, rejected: applied.rejected, now },
+      response: {
+        rev,
+        reset,
+        lists: parts.list.rows,
+        tasks: parts.task.rows,
+        notes: parts.note.rows,
+        gone: { lists: parts.list.gone, tasks: parts.task.gone, notes: parts.note.gone },
+        acked: applied.acked,
+        rejected: applied.rejected,
+        now,
+      },
       poke: applied.poke,
     };
   });
@@ -814,28 +965,36 @@ export function pruneTombstones(input: { db: Db; now: number }): number {
   const { db } = input;
   const before = input.now - TOMBSTONE_MAX_AGE_MS;
   return db.tx(() => {
-    const oldLists = (db.q('SELECT id FROM lists WHERE deleted = 1 AND at < ?').all(before) as { id: ID }[]).map((r) => r.id);
-    const oldTasks = (db.q('SELECT id FROM tasks WHERE deleted = 1 AND at < ?').all(before) as { id: ID }[]).map((r) => r.id);
+    const old = (text: string): ID[] => (db.q(text).all(before) as { id: ID }[]).map((r) => r.id);
+    const oldLists = old('SELECT id FROM lists WHERE deleted = 1 AND at < ?');
+    const oldTasks = old('SELECT id FROM tasks WHERE deleted = 1 AND at < ?');
+    const oldNotes = old('SELECT id FROM notes WHERE deleted = 1 AND at < ?');
     for (const listId of oldLists) {
       for (const r of db.q('SELECT id FROM tasks WHERE list_id = ?').all(listId) as { id: ID }[]) oldTasks.push(r.id);
     }
     // The 'gone' marks go away with the rows. A device that did not sync after the newest of them
     // can no longer learn that the rows are gone, so the sync tells it to start again.
     let pruned = Number(db.getMeta('pruned_rev') ?? 0);
-    const note = (row: unknown): void => {
+    const raise = (row: unknown): void => {
       pruned = Math.max(pruned, (row as { lost: number | null }).lost ?? 0);
     };
     for (const taskId of oldTasks) {
-      note(db.q('SELECT MAX(lost_rev) AS lost FROM task_user WHERE task_id = ?').get(taskId));
+      raise(db.q('SELECT MAX(lost_rev) AS lost FROM task_user WHERE task_id = ?').get(taskId));
       db.q('DELETE FROM task_user WHERE task_id = ?').run(taskId);
       db.q('DELETE FROM tasks WHERE id = ?').run(taskId);
     }
     for (const listId of oldLists) {
-      note(db.q('SELECT MAX(lost_rev) AS lost FROM list_user WHERE list_id = ?').get(listId));
+      raise(db.q('SELECT MAX(lost_rev) AS lost FROM list_user WHERE list_id = ?').get(listId));
       db.q('DELETE FROM list_user WHERE list_id = ?').run(listId);
       db.q('DELETE FROM lists WHERE id = ?').run(listId);
     }
-    if (oldLists.length + oldTasks.length > 0) db.setMeta('pruned_rev', String(pruned));
-    return oldLists.length + oldTasks.length;
+    for (const noteId of oldNotes) {
+      raise(db.q('SELECT MAX(lost_rev) AS lost FROM note_user WHERE note_id = ?').get(noteId));
+      db.q('DELETE FROM note_user WHERE note_id = ?').run(noteId);
+      db.q('DELETE FROM notes WHERE id = ?').run(noteId);
+    }
+    const count = oldLists.length + oldTasks.length + oldNotes.length;
+    if (count > 0) db.setMeta('pruned_rev', String(pruned));
+    return count;
   });
 }

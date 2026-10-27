@@ -126,6 +126,40 @@ const MIGRATIONS: string[] = [
     value TEXT NOT NULL
   ) STRICT, WITHOUT ROWID;
   `,
+  // Notes. Only IF NOT EXISTS, so a database that was set back to version 1 for a way back can run
+  // this entry again (SPEC section 11).
+  `
+  -- A note is not part of a list. Who can see it comes from its own owner, shared, and deleted.
+  CREATE TABLE IF NOT EXISTS notes (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL,
+    color TEXT NOT NULL,
+    shared INTEGER NOT NULL,
+    edited_at INTEGER NOT NULL,
+    edited_by TEXT,
+    deleted INTEGER NOT NULL,
+    owner TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    rev INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS notes_rev ON notes(rev);
+
+  CREATE TABLE IF NOT EXISTS note_user (
+    note_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
+    rev INTEGER NOT NULL DEFAULT 0,
+    ts TEXT NOT NULL DEFAULT '{}',
+    lost_rev INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (note_id, user_id)
+  ) STRICT, WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS note_user_rev ON note_user(user_id, rev);
+  CREATE INDEX IF NOT EXISTS note_user_lost ON note_user(user_id, lost_rev);
+  `,
 ];
 
 export interface Db {

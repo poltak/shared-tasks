@@ -133,6 +133,29 @@ describe('seed', () => {
     expect(s.tasks).toHaveLength(2 + 5);
     expect(s.tasks.every((t) => !t.starred)).toBe(true);
 
+    // The notes, newest first, as the screen shows them: title, color, owner, shared, pinned, archived.
+    const notes = (r: SyncResponse): unknown[] =>
+      [...r.notes]
+        .sort((x, y) => y.createdAt - x.createdAt)
+        .map((n) => [n.title, n.color, n.owner === alex.id ? 'Alex' : 'Sam', n.shared, n.pinned, n.archived]);
+    expect(notes(a)).toEqual([
+      ['Dinner party menu', 'orange', 'Alex', true, false, false],
+      ['Lake house checklist', 'yellow', 'Alex', false, true, false],
+      ['', 'green', 'Alex', false, false, false],
+      ['Book club reading list', 'default', 'Alex', false, false, false],
+      ['Gift ideas for Grandma', 'pink', 'Alex', false, false, true],
+    ]);
+    const menu = a.notes.find((n) => n.title === 'Dinner party menu')!;
+    expect(menu).toMatchObject({ body: '- [ ] Lasagne\n- [ ] Green salad\n- [x] Tiramisu', createdAt: now, editedAt: now, editedBy: sam.id });
+    expect(a.notes.find((n) => n.title === '')?.body).toBe('Ring the plumber before Friday');
+    expect(a.notes.filter((n) => n !== menu).every((n) => n.editedBy === alex.id && n.editedAt === n.createdAt)).toBe(true);
+    // Sam sees the shared note with his own per-person values, and his own note.
+    expect(notes(s)).toEqual([
+      ['Dinner party menu', 'orange', 'Alex', true, false, false],
+      ['Bike repair parts', 'blue', 'Sam', false, false, false],
+    ]);
+    expect(s.notes.find((n) => n.owner === sam.id)?.body).toBe('Front brake pads\nInner tube 28 inch\nChain oil');
+
     // Only for a database with no accounts.
     expect(() => seed({ db, accounts, now })).toThrow(/has accounts/);
     db.close();
@@ -210,7 +233,11 @@ describe('the entry file', () => {
     const alex = await kit.login(alexLogin.name, alexLogin.password);
     const first = await alex.sync();
     const groceries = first.lists.find((l) => l.title === 'Groceries')!;
-    await alex.sync([kit.task({ listId: groceries.id, title: 'Not in the seed' }), { kind: 'list', id: groceries.id, fields: { title: 'Changed' } }]);
+    await alex.sync([
+      kit.task({ listId: groceries.id, title: 'Not in the seed' }),
+      { kind: 'list', id: groceries.id, fields: { title: 'Changed' } },
+      kit.note({ title: 'Not in the seed' }),
+    ]);
     const stale = alex.since;
 
     const reset = await kit.call({ path: '/api/test/reset', body: {} });
@@ -226,6 +253,7 @@ describe('the entry file', () => {
     expect(after.lists.map((l) => l.title).sort()).toEqual(['Groceries', 'Home', 'My Tasks']);
     expect(after.tasks).toHaveLength(17);
     expect(after.tasks.some((t) => t.title === 'Not in the seed')).toBe(false);
+    expect(after.notes.map((n) => n.title).sort()).toEqual(['', 'Book club reading list', 'Dinner party menu', 'Gift ideas for Grandma', 'Lake house checklist']);
     // A second reset is quick, because the password hashes are made one time.
     const started = Date.now();
     expect((await kit.call({ path: '/api/test/reset', body: {} })).status).toBe(200);

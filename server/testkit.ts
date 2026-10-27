@@ -9,7 +9,7 @@ import { startServer } from './app.ts';
 import type { RunningServer, ServerOptions } from './app.ts';
 import { loadConfig, ROOT } from './config.ts';
 import * as hlc from '../shared/hlc.ts';
-import type { HLC, ID, ListFields, MeResponse, Op, Put, SyncResponse, TaskFields, User } from '../shared/types.ts';
+import type { HLC, ID, ListFields, MeResponse, NoteFields, Op, Put, SyncResponse, TaskFields, User } from '../shared/types.ts';
 
 let serial = 0;
 
@@ -75,6 +75,8 @@ export interface Kit {
   op(put: Put, ts?: HLC): Op;
   list(fields: ListFields, id?: ID): Put & { kind: 'list' };
   task(fields: TaskFields, id?: ID): Put & { kind: 'task' };
+  /** A put that makes a note: it has createdAt, as SPEC section 3 says. */
+  note(fields: NoteFields, id?: ID): Put & { kind: 'note' };
   call<T = any>(input: { path: string; body?: unknown; cookie?: string; headers?: Record<string, string> }): Promise<Reply<T>>;
   /** Makes an account and signs in. */
   register(name: string): Promise<Person>;
@@ -142,6 +144,7 @@ export function makeKit(server: { url: string }, now: () => number = Date.now): 
     op,
     list: (fields, id = randomUUID()) => ({ kind: 'list', id, fields: { createdAt: now(), ...fields } }),
     task: (fields, id = randomUUID()) => ({ kind: 'task', id, fields: { createdAt: now(), ...fields } }),
+    note: (fields, id = randomUUID()) => ({ kind: 'note', id, fields: { createdAt: now(), ...fields } }),
     call,
     register: (name) => enter('/api/register', name, passwordOf(name)),
     login: (name, password) => enter('/api/login', name, password ?? passwordOf(name)),

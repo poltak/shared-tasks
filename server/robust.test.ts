@@ -217,19 +217,25 @@ describe('requests that are not complete or not valid', () => {
       return seed % n;
     };
     const pick = <T>(items: readonly T[]): T => items[random(items.length)]!;
-    const ids = ['fuzz-list', 'fuzz-task-1', 'fuzz-task-2', listId, 'no-such-row', '', 'bad id', 5, null];
+    const ids = ['fuzz-list', 'fuzz-task-1', 'fuzz-task-2', 'fuzz-note-1', 'fuzz-note-2', listId, 'no-such-row', '', 'bad id', 5, null];
     const values = [
       null, true, false, 0, 1, -1, 1.5, 1e300, '', 'text', 'a0', '2026-10-06', '09:30', '24:61', 'x'.repeat(3000), '\u0000', '🍉',
       [], [1], {}, { type: 'never' }, { every: 1, unit: 'day', start: '2026-10-06', end: { type: 'never' } },
       { every: 1, unit: 'week', weekdays: [1, 8], start: '2026-10-06', end: { type: 'after', count: 2 } }, 'fuzz-list', 'fuzz-task-1', listId,
+      'red', 'darkblue', 'neon', 1_790_000_000_000,
     ];
     const names = [
       'listId', 'parentId', 'title', 'notes', 'pos', 'due', 'time', 'deadline', 'repeat', 'repeatCount', 'hiddenUntil', 'lastDoneAt',
       'lastDoneDue', 'completed', 'completedAt', 'completedBy', 'createdAt', 'createdBy', 'deleted', 'starred', 'starredAt',
       'owner', 'shared', 'isDefault', 'sort', 'hidden', '__proto__', 'constructor', 'toString', 'rev', 'ts', 'id',
+      'body', 'color', 'editedAt', 'editedBy', 'pinned', 'archived', 'edited_at', 'note_id',
     ];
     const stamps = [kit.ts(), kit.at(Date.now() + 3_600_000), kit.at(1), '0'.repeat(18), 'z'.repeat(18), 'bad', 5, null];
-    await alex.sync([kit.list({ title: 'Fuzz' }, 'fuzz-list'), kit.task({ listId: 'fuzz-list', title: 'Fuzz' }, 'fuzz-task-1')]);
+    await alex.sync([
+      kit.list({ title: 'Fuzz' }, 'fuzz-list'),
+      kit.task({ listId: 'fuzz-list', title: 'Fuzz' }, 'fuzz-task-1'),
+      kit.note({ title: 'Fuzz' }, 'fuzz-note-1'),
+    ]);
 
     for (let round = 0; round < 60; round++) {
       const ops = Array.from({ length: 40 }, (_, i) => {
@@ -237,7 +243,8 @@ describe('requests that are not complete or not valid', () => {
         for (let n = random(5); n >= 0; n--) fields[pick(names)] = pick(values);
         // Some ops are valid, so the rows do change between the bad ops.
         if (random(4) === 0) return kit.op({ kind: 'task', id: pick(['fuzz-task-1', 'fuzz-task-2']), fields: { listId: pick(['fuzz-list', listId]), title: `Fuzz ${i}`, deleted: random(3) === 0 } });
-        return { opId: random(20) === 0 ? pick(values) : `fuzz-${round}-${i}`, ts: pick(stamps), kind: pick(['task', 'list', 'task', 'list', 'user', null]), id: pick(ids), fields: random(15) === 0 ? pick(values) : fields };
+        if (random(8) === 0) return kit.op({ kind: 'note', id: pick(['fuzz-note-1', 'fuzz-note-2']), fields: { title: `Fuzz ${i}`, createdAt: 1, deleted: random(3) === 0 } });
+        return { opId: random(20) === 0 ? pick(values) : `fuzz-${round}-${i}`, ts: pick(stamps), kind: pick(['task', 'list', 'note', 'task', 'list', 'note', 'user', null]), id: pick(ids), fields: random(15) === 0 ? pick(values) : fields };
       });
       const text = JSON.stringify({ clientId: 'fuzz', since: pick([0, 1, alex.since, 1e9]), ops, tz: pick(['UTC', 'x', null]) });
       const reply = await alex.call<SyncResponse>('/api/sync', text);
@@ -245,7 +252,7 @@ describe('requests that are not complete or not valid', () => {
       const named = (JSON.parse(text) as { ops: { opId: unknown }[] }).ops.filter((op) => typeof op.opId === 'string').map((op) => op.opId);
       expect([...reply.data.acked, ...reply.data.rejected].sort()).toEqual(named.sort());
       // No row is in the answer two times, and no row is also a 'gone' id.
-      for (const kind of ['lists', 'tasks'] as const) {
+      for (const kind of ['lists', 'tasks', 'notes'] as const) {
         const all = [...reply.data[kind].map((row) => row.id), ...reply.data.gone[kind]];
         expect(new Set(all).size).toBe(all.length);
       }

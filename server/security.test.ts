@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vite
 import { dbPath } from './db.ts';
 import { makeKit, rawRequest, startTestServer } from './testkit.ts';
 import type { Kit, Person, Reply, TestServer } from './testkit.ts';
-import type { ApiError, ID, ListFields, MeResponse, Op, Put, SyncResponse, TaskFields } from '../shared/types.ts';
+import type { ApiError, ID, ListFields, MeResponse, NoteFields, Op, Put, SyncResponse, TaskFields } from '../shared/types.ts';
 
 const DAY = 86_400_000;
 
@@ -25,9 +25,13 @@ let sharedList: ID;
 let sharedTask: ID;
 let samDefault: ID;
 let samList: ID;
+/** A private note of Alex, and a note that Alex shares. */
+let secretNote: ID;
+let sharedNote: ID;
 
 const setTask = (id: ID, fields: TaskFields): Put => ({ kind: 'task', id, fields });
 const setList = (id: ID, fields: ListFields): Put => ({ kind: 'list', id, fields });
+const setNote = (id: ID, fields: NoteFields): Put => ({ kind: 'note', id, fields });
 const code = (reply: { data: ApiError }): string => reply.data.error?.code;
 
 beforeAll(async () => {
@@ -43,13 +47,19 @@ beforeAll(async () => {
     kit.task({ listId: secret.id, title: 'Secret task two' }),
     kit.task({ listId: shared.id, title: 'Milk' }),
   ];
-  const first = await alex.sync([secret, shared, ...tasks]);
+  const notes = [
+    kit.note({ title: 'Secret note', body: 'Secret body', color: 'red', pinned: true }),
+    kit.note({ title: 'Party menu', body: 'Soup', shared: true }),
+  ];
+  const first = await alex.sync([secret, shared, ...tasks, ...notes]);
   expect(first.rejected).toEqual([]);
   alexDefault = first.lists.find((l) => l.isDefault)!.id;
   secretList = secret.id;
   secretTasks = [tasks[0]!.id, tasks[1]!.id];
   sharedList = shared.id;
   sharedTask = tasks[2]!.id;
+  secretNote = notes[0]!.id;
+  sharedNote = notes[1]!.id;
 
   const own = kit.list({ title: 'List of Sam' });
   const second = await sam.sync([own]);
@@ -59,11 +69,11 @@ beforeAll(async () => {
 afterAll(() => server.stop());
 afterEach(() => vi.restoreAllMocks());
 
-/** All rows of the lists and tasks, to see that an attack changed nothing. */
+/** All rows of the lists, tasks, and notes, to see that an attack changed nothing. */
 function snapshot(): string {
   const { db } = server.app;
   return JSON.stringify(
-    ['lists', 'tasks', 'list_user', 'task_user'].map((table) => db.q(`SELECT * FROM ${table} ORDER BY 1, 2`).all()),
+    ['lists', 'tasks', 'notes', 'list_user', 'task_user', 'note_user'].map((table) => db.q(`SELECT * FROM ${table} ORDER BY 1, 2`).all()),
   );
 }
 
@@ -82,15 +92,17 @@ async function attack(puts: (Put | Op)[]): Promise<SyncResponse> {
   const text = JSON.stringify(reply);
   expect(text).not.toContain('Secret');
   const sent = new Set(puts.map((p) => p.id));
-  for (const id of [secretList, ...secretTasks, alexDefault]) {
+  const secrets = [secretList, ...secretTasks, alexDefault, secretNote];
+  for (const id of secrets) {
     if (!sent.has(id)) expect(text).not.toContain(id);
   }
   // A secret id that Sam sent comes back only as a 'gone' id.
-  for (const row of [...reply.lists, ...reply.tasks]) expect([secretList, ...secretTasks, alexDefault]).not.toContain(row.id);
+  for (const row of [...reply.lists, ...reply.tasks, ...reply.notes]) expect(secrets).not.toContain(row.id);
   for (const task of reply.tasks) expect([secretList, alexDefault]).not.toContain(task.listId);
 
   const forAlex = await alex.sync();
-  expect(forAlex.lists.length + forAlex.tasks.length + forAlex.gone.lists.length + forAlex.gone.tasks.length).toBe(0);
+  expect(forAlex.lists.length + forAlex.tasks.length + forAlex.notes.length).toBe(0);
+  expect(forAlex.gone).toEqual({ lists: [], tasks: [], notes: [] });
   return reply;
 }
 
@@ -164,6 +176,63 @@ describe('one person against the private rows of the other person', () => {
     expect([...reply.gone.lists].sort()).toEqual([secretList, alexDefault].sort());
   });
 
+  test('a put with the id of a private note of the other person', async () => {
+    const reply = await attack([
+      setNote(secretNote, { title: 'Changed by Sam' }),
+      setNote(secretNote, { body: '' }),
+      setNote(secretNote, { color: 'blue' }),
+      setNote(secretNote, { editedAt: clock, editedBy: sam.user.id }),
+      setNote(secretNote, { shared: true }),
+      setNote(secretNote, { deleted: true }),
+      setNote(secretNote, { shared: true, deleted: false }),
+      // A put that makes a note, as if Sam made a note with this id.
+      kit.note({ title: 'Mine now', owner: sam.user.id, shared: true }, secretNote),
+      kit.note({ title: '', body: '' }, secretNote),
+      // The same with a timestamp of the future.
+      kit.op(setNote(secretNote, { title: 'From the future', shared: true }), kit.at(clock + 10 * DAY)),
+    ]);
+    expect(reply.notes).toEqual([]);
+    expect(reply.gone.notes).toEqual([secretNote]);
+  });
+
+  test('per-person fields on a note that the person cannot see', async () => {
+    await attack([
+      setNote(secretNote, { pinned: true }),
+      setNote(secretNote, { pinned: false }),
+      setNote(secretNote, { archived: true }),
+      setNote(secretNote, { pinned: true, archived: true, createdAt: clock }),
+    ]);
+    expect(server.app.db.q('SELECT COUNT(*) AS n FROM note_user WHERE user_id = ? AND note_id = ?').get(sam.user.id, secretNote)).toEqual({ n: 0 });
+  });
+
+  test('only the owner stops the sharing of a note or deletes it, and the fixed fields of a note do not change', async () => {
+    await alex.sync();
+    const before = snapshot();
+    const reply = await sam.sync([
+      setNote(sharedNote, { shared: false }),
+      setNote(sharedNote, { deleted: true }),
+      setNote(sharedNote, { title: 'Renamed too', shared: false }),
+      setNote(sharedNote, { pinned: true, deleted: true }),
+      kit.op(setNote(sharedNote, { deleted: true }), kit.at(clock + 10 * DAY)),
+    ]);
+    expect(reply.acked).toEqual([]);
+    expect(reply.rejected).toHaveLength(5);
+    expect(reply.notes).toEqual([expect.objectContaining({ id: sharedNote, title: 'Party menu', shared: true, deleted: false, pinned: false })]);
+    expect(snapshot()).toBe(before);
+
+    // On a note that Sam can see, the fixed fields are ignored.
+    const fixed = await sam.sync([setNote(sharedNote, { owner: sam.user.id }), setNote(sharedNote, { createdAt: 1 }), kit.note({ owner: sam.user.id }, sharedNote)]);
+    expect(fixed.rejected).toEqual([]);
+    expect(snapshot()).toBe(before);
+    const forAlex = await alex.sync();
+    expect(forAlex.notes.length + forAlex.gone.notes.length).toBe(0);
+
+    // A new note gets the owner of the session, and Alex gets nothing from it.
+    const made = kit.note({ title: 'With a wrong owner', owner: alex.user.id });
+    expect((await sam.sync([made])).notes).toEqual([expect.objectContaining({ id: made.id, owner: sam.user.id })]);
+    expect(JSON.stringify(await alex.sync())).not.toContain(made.id);
+  });
+
   test('a list put cannot change the owner or make a default list', async () => {
     await alex.sync();
     const before = snapshot();
@@ -234,6 +303,7 @@ describe('one person against the private rows of the other person', () => {
 
   test('ids with SQL text or path text are not ids', async () => {
     const bad = ["x' OR '1'='1", 'x"; DROP TABLE tasks; --', '../../etc/passwd', 'a b', 'a\u0000b', 'ü', '', 'x'.repeat(65), 'x'.repeat(1_000_000)];
+    const notes = server.app.db.q('SELECT COUNT(*) AS n FROM notes').get();
     const reply = await sam.sync([
       ...bad.map((id) => setTask(id, { listId: samList, title: 'Bad id' })),
       ...bad.map((id) => setList(id, { title: 'Bad id' })),
@@ -242,7 +312,11 @@ describe('one person against the private rows of the other person', () => {
       ...bad.map((id) => setTask(sharedTask, { completedBy: id })),
     ]);
     expect(reply.acked).toEqual([]);
+    // In a second request: the very long id makes each body large.
+    const forNotes = await sam.sync([...bad.map((id) => kit.note({ title: 'Bad id' }, id)), ...bad.map((id) => setNote(sharedNote, { editedBy: id }))]);
+    expect(forNotes.acked).toEqual([]);
     expect(server.app.db.q('SELECT COUNT(*) AS n FROM tasks').get()).toEqual({ n: 4 });
+    expect(server.app.db.q('SELECT COUNT(*) AS n FROM notes').get()).toEqual(notes);
     // A very long op id or device id does not go into the database.
     const long = await sam.call<SyncResponse & ApiError>('/api/sync', {
       clientId: sam.clientId,
@@ -263,7 +337,7 @@ describe('one person against the private rows of the other person', () => {
       const text = JSON.stringify(reply.data);
       expect(text).not.toContain('Secret');
       // The default list of Alex was shared for a time in a test above, so its id can be a 'gone' id.
-      for (const id of [secretList, ...secretTasks]) expect(text).not.toContain(id);
+      for (const id of [secretList, ...secretTasks, secretNote]) expect(text).not.toContain(id);
       for (const row of [...reply.data.lists, ...reply.data.tasks]) expect(row.id).not.toBe(alexDefault);
     }
     for (const since of [-1, 0.5, 1e20, '0', null, [], {}, true]) {
@@ -351,6 +425,44 @@ describe('wrong types', () => {
     expect(await rows()).toEqual(before);
     // The device gets the true rows back.
     expect([reply.lists.length, reply.tasks.length]).toEqual([1, 1]);
+  });
+
+  test('a wrong value in each field of a note: the op is rejected and the note stays', async () => {
+    const badNote: Record<keyof NoteFields, unknown[]> = {
+      title: texts,
+      body: texts,
+      color: [null, 5, true, {}, [], '', 'neon', 'Red', 'dark blue', 'darkBlue', ' red', '#ff0000'],
+      shared: flags,
+      editedAt: [null, ...stamps],
+      editedBy: idValues,
+      deleted: flags,
+      owner: [null, ...idValues],
+      createdAt: [null, ...stamps],
+      pinned: flags,
+      archived: flags,
+    };
+    const note = kit.note({ title: 'Types', body: 'Body', color: 'yellow', pinned: true });
+    await alex.sync([note]);
+    const row = async (): Promise<unknown> => (await (await kit.login('Alex')).sync()).notes.find((n) => n.id === note.id);
+    const before = await row();
+    const rev = alex.since;
+
+    const ops: Op[] = [];
+    for (const [field, values] of Object.entries(badNote)) {
+      // The bad field stands with a good one: the good one must not apply.
+      for (const value of values) ops.push(kit.op(setNote(note.id, { title: 'Must not apply', archived: true, [field]: value } as NoteFields)));
+    }
+    const made = Object.entries(badNote).flatMap(([field, values]) => values.map((value) => kit.note({ title: 'Must not be made', [field]: value } as NoteFields)));
+    expect(ops.length).toBeGreaterThan(50);
+    const reply = await alex.sync([...ops, ...made]);
+    expect(reply.acked).toEqual([]);
+    expect(reply.rejected).toHaveLength(ops.length + made.length);
+    expect(reply.rev).toBe(rev);
+    expect(await row()).toEqual(before);
+    // The device gets the true note back, and the ids of the notes that were not made.
+    expect(reply.notes).toEqual([before]);
+    expect([...reply.gone.notes].sort()).toEqual(made.map((p) => p.id).sort());
+    expect(server.app.db.q("SELECT COUNT(*) AS n FROM notes WHERE title = 'Must not be made'").get()).toEqual({ n: 0 });
   });
 
   test('a wrong frame of an op', async () => {

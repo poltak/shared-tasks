@@ -26,9 +26,13 @@ const setTask = (id: ID, fields: TaskFields): Put => ({ kind: 'task', id, fields
 const setList = (id: ID, fields: ListFields): Put => ({ kind: 'list', id, fields });
 const ids = (rows: { id: ID }[]): ID[] => rows.map((r) => r.id).sort();
 const nothing = (r: SyncResponse): boolean =>
-  r.lists.length + r.tasks.length + r.gone.lists.length + r.gone.tasks.length === 0;
+  r.lists.length + r.tasks.length + r.notes.length + r.gone.lists.length + r.gone.tasks.length + r.gone.notes.length === 0;
 /** The gone ids in a fixed order. The server gives them in no special order. */
-const gone = (r: SyncResponse): SyncResponse['gone'] => ({ lists: [...r.gone.lists].sort(), tasks: [...r.gone.tasks].sort() });
+const gone = (r: SyncResponse): SyncResponse['gone'] => ({
+  lists: [...r.gone.lists].sort(),
+  tasks: [...r.gone.tasks].sort(),
+  notes: [...r.gone.notes].sort(),
+});
 
 /** Brings each person to the newest revision, so the next sync of a person shows only what a test did. */
 async function settle(): Promise<void> {
@@ -153,7 +157,7 @@ describe('rows', () => {
     const reply = await device.sync();
 
     expect(reply.reset).toBe(false);
-    expect(reply.gone).toEqual({ lists: [], tasks: [] });
+    expect(reply.gone).toEqual({ lists: [], tasks: [], notes: [] });
     expect(reply.lists.map((l) => l.id)).toContain(list);
     expect(reply.lists.some((l) => l.isDefault)).toBe(true);
     const mine = reply.tasks.filter((t) => t.listId === list);
@@ -377,19 +381,19 @@ describe('visibility', () => {
       expect(ids(reply.lists)).toEqual([list]);
       expect(reply.lists[0]).toMatchObject({ shared: true, owner: alex.user.id, pos: null });
       expect(ids(reply.tasks)).toEqual(open);
-      expect(reply.gone).toEqual({ lists: [], tasks: [] });
+      expect(reply.gone).toEqual({ lists: [], tasks: [], notes: [] });
     }
 
     const stop = await alex.sync([setList(list, { shared: false })]);
     // The owner keeps the rows. The server sends them again with the new state.
-    expect(stop.gone).toEqual({ lists: [], tasks: [] });
+    expect(stop.gone).toEqual({ lists: [], tasks: [], notes: [] });
     expect(stop.lists[0]).toMatchObject({ id: list, shared: false });
     for (const person of [sam, kim]) {
       const reply = await person.sync();
       expect(reply.lists).toEqual([]);
       expect(reply.tasks).toEqual([]);
       // The task that was deleted before the share never reached them, so its id does not go out.
-      expect(gone(reply)).toEqual({ lists: [list], tasks: open });
+      expect(gone(reply)).toEqual({ lists: [list], tasks: open, notes: [] });
       expect(nothing(await person.sync())).toBe(true);
     }
 
@@ -402,7 +406,7 @@ describe('visibility', () => {
     const again = await sam.sync();
     expect(ids(again.lists)).toEqual([list]);
     expect(ids(again.tasks)).toEqual([tasks[1]!, added.id].sort());
-    expect(again.gone).toEqual({ lists: [], tasks: [] });
+    expect(again.gone).toEqual({ lists: [], tasks: [], notes: [] });
   });
 
   test('a device that was away for the full time of a share gets nothing from it', async () => {
@@ -423,7 +427,7 @@ describe('visibility', () => {
     const reply = await sam.sync();
     expect(ids(reply.lists)).toEqual([list]);
     expect(ids(reply.tasks)).toEqual([...tasks].sort());
-    expect(reply.gone).toEqual({ lists: [], tasks: [] });
+    expect(reply.gone).toEqual({ lists: [], tasks: [], notes: [] });
   });
 
   test('a change of shared gives each task of the list a new revision', async () => {
@@ -440,9 +444,9 @@ describe('visibility', () => {
     const reply = await alex.sync([setList(list, { deleted: true })]);
     expect(reply.lists).toEqual([]);
     expect(reply.tasks).toEqual([]);
-    expect(gone(reply)).toEqual({ lists: [list], tasks: sorted });
+    expect(gone(reply)).toEqual({ lists: [list], tasks: sorted, notes: [] });
     const forSam = await sam.sync();
-    expect(gone(forSam)).toEqual({ lists: [list], tasks: sorted });
+    expect(gone(forSam)).toEqual({ lists: [list], tasks: sorted, notes: [] });
     expect(forSam.lists).toEqual([]);
     // A first sync does not show the deleted list and its tasks.
     const fresh = await (await kit.login('Kim')).sync();
@@ -455,7 +459,7 @@ describe('visibility', () => {
     const back = await sam.sync();
     expect(ids(back.lists)).toEqual([list]);
     expect(ids(back.tasks)).toEqual(sorted);
-    expect(back.gone).toEqual({ lists: [], tasks: [] });
+    expect(back.gone).toEqual({ lists: [], tasks: [], notes: [] });
   });
 
   test('a task that moves to a private list is gone for the other person', async () => {
@@ -468,7 +472,7 @@ describe('visibility', () => {
     expect(moved.gone.tasks).toEqual([]);
     const forSam = await sam.sync();
     expect(forSam.tasks).toEqual([]);
-    expect(forSam.gone).toEqual({ lists: [], tasks: [first] });
+    expect(forSam.gone).toEqual({ lists: [], tasks: [first], notes: [] });
 
     // Back in the shared list, the task arrives again.
     await alex.sync([setTask(first, { listId: shared.list })]);
@@ -477,8 +481,8 @@ describe('visibility', () => {
     // Sam moves a task to a list of his own: now it is gone for Alex and Kim.
     const ofSam = await makeList({ shared: false, owner: sam });
     await sam.sync([setTask(second, { listId: ofSam.list })]);
-    expect((await alex.sync()).gone).toEqual({ lists: [], tasks: [second] });
-    expect((await kim.sync()).gone).toEqual({ lists: [], tasks: [second] });
+    expect((await alex.sync()).gone).toEqual({ lists: [], tasks: [second], notes: [] });
+    expect((await kim.sync()).gone).toEqual({ lists: [], tasks: [second], notes: [] });
   });
 });
 
@@ -622,7 +626,7 @@ describe('ops that the server does not accept', () => {
     const good1 = kit.op(setTask(id, { title: 'First good op' }));
     const good2 = kit.op(setTask(id, { notes: 'Second good op', color: 'red' } as TaskFields));
     const bad = [
-      { ...kit.op(setTask(id, { title: 'x' })), kind: 'note' },
+      { ...kit.op(setTask(id, { title: 'x' })), kind: 'user' },
       { ...kit.op(setTask(id, { title: 'x' })), id: 'not a valid id' },
       { ...kit.op(setTask(id, { title: 'x' })), id: 'x'.repeat(65) },
       { ...kit.op(setTask(id, { title: 'x' })), ts: 'not-a-timestamp' },
@@ -662,7 +666,7 @@ describe('ops that the server does not accept', () => {
     expect(reply.data.tasks).toHaveLength(1);
     expect(reply.data.tasks[0]).toMatchObject({ id, title: 'First good op', notes: 'Second good op' });
     expect(reply.data.tasks[0]).not.toHaveProperty('color');
-    expect(reply.data.gone).toEqual({ lists: [], tasks: [] });
+    expect(reply.data.gone).toEqual({ lists: [], tasks: [], notes: [] });
   });
 
   test('the op that makes a list can come after the ops for its tasks', async () => {
@@ -718,12 +722,12 @@ describe('ops that the server does not accept', () => {
     expect(reply.tasks[0]).toMatchObject({ id: shared.tasks[0], title: 'Task 0' });
     expect(reply.lists).toHaveLength(1);
     expect(reply.lists[0]).toMatchObject({ id: shared.list, deleted: false });
-    expect(reply.gone).toEqual({ lists: [secret.list], tasks: secret.tasks });
+    expect(reply.gone).toEqual({ lists: [secret.list], tasks: secret.tasks, notes: [] });
 
     // The same on a first sync, where the device has only the rows of its own ops.
     const fresh = await kit.login('Sam');
     const first = await fresh.sync([setTask(secret.tasks[0]!, { title: 'Mine now' }), setTask(shared.tasks[0]!, { title: 7 } as never)]);
-    expect(first.gone).toEqual({ lists: [], tasks: secret.tasks });
+    expect(first.gone).toEqual({ lists: [], tasks: secret.tasks, notes: [] });
     expect(first.tasks.filter((t) => t.id === shared.tasks[0])).toHaveLength(1);
   });
 
@@ -869,7 +873,7 @@ describe('the true state after an op', () => {
     expect(undo.acked).toHaveLength(4);
     expect(undo.lists).toEqual([]);
     expect(undo.tasks).toEqual([]);
-    expect(gone(undo)).toEqual({ lists: [list], tasks: [first, second, 'new-in-deleted-list'].sort() });
+    expect(gone(undo)).toEqual({ lists: [list], tasks: [first, second, 'new-in-deleted-list'].sort(), notes: [] });
     // A new name for the deleted list: the op applies, and the device must still drop the row.
     const renamed = await alex.sync([kit.op(setList(list, { title: 'A name for a deleted list' }), kit.at(clock + 35_000, 'phone0'))]);
     expect(renamed.acked).toHaveLength(1);
@@ -900,7 +904,7 @@ describe('the true state after an op', () => {
       const got = await person.sync();
       expect(ids(got.lists)).toEqual([list]);
       expect(ids(got.tasks)).toEqual([third]);
-      expect(got.gone).toEqual({ lists: [], tasks: [] });
+      expect(got.gone).toEqual({ lists: [], tasks: [], notes: [] });
       const text = JSON.stringify(got);
       for (const secret of [first, second, brief.id, other.list]) expect(text).not.toContain(secret);
     }
@@ -924,7 +928,7 @@ describe('the true state after an op', () => {
     await alex.sync([setTask(tasks[0]!, { title: 'Changed in the same request' }), setList(list, { shared: false })]);
     const reply = await sam.sync();
     expect(reply.tasks).toEqual([]);
-    expect(gone(reply)).toEqual({ lists: [list], tasks: [...tasks].sort() });
+    expect(gone(reply)).toEqual({ lists: [list], tasks: [...tasks].sort(), notes: [] });
   });
 
   test('a put that makes a task needs a list and a title', async () => {
@@ -966,7 +970,7 @@ describe('cleanup of old deleted rows', () => {
       return reply.data;
     })();
     expect(normal.reset).toBe(false);
-    expect(gone(normal)).toEqual({ lists: [doomed.list], tasks: [gone1, ...doomed.tasks].sort() });
+    expect(gone(normal)).toEqual({ lists: [doomed.list], tasks: [gone1, ...doomed.tasks].sort(), notes: [] });
 
     clock += 2 * DAY;
     server.maintain();
@@ -982,7 +986,7 @@ describe('cleanup of old deleted rows', () => {
     away.since = stale;
     const reply = await away.sync();
     expect(reply.reset).toBe(true);
-    expect(reply.gone).toEqual({ lists: [], tasks: [] });
+    expect(reply.gone).toEqual({ lists: [], tasks: [], notes: [] });
     expect(reply.lists.map((l) => l.id)).toContain(shared.list);
     expect(reply.lists.map((l) => l.id)).not.toContain(doomed.list);
     expect(ids(reply.tasks.filter((t) => t.listId === shared.list))).toEqual([keep1, keep2].sort());

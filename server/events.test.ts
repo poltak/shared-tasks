@@ -183,6 +183,20 @@ test('a share change gives a poke to the person who gets or loses the list', asy
   expect(await stream.poke()).toEqual({ rev: stop.rev });
 });
 
+test('a change of a private note gives no poke to the other person. A share and its end give one', async () => {
+  const note = kit.note({ title: 'Private note' });
+  await alex.sync([note]);
+  const ofSam = await listenAs(sam);
+  const ofAlex = await listenAs(await kit.login('Alex'));
+  const hidden = await alex.sync([{ kind: 'note', id: note.id, fields: { body: 'Still private' } }]);
+  expect(await ofAlex.poke()).toEqual({ rev: hidden.rev });
+  const share = await alex.sync([{ kind: 'note', id: note.id, fields: { shared: true } }]);
+  // The next poke of Sam is the one for the share. So no poke came for the private change.
+  expect(await ofSam.poke()).toEqual({ rev: share.rev });
+  const stop = await alex.sync([{ kind: 'note', id: note.id, fields: { shared: false } }]);
+  expect(await ofSam.poke()).toEqual({ rev: stop.rev });
+});
+
 test('the server removes a stream when the client closes it, and ends the stream at a sign-out', async () => {
   await waitFor(() => server.app.events.size() === 0);
   const phone = await kit.login('Sam');

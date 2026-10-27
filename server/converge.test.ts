@@ -9,9 +9,10 @@ import { parseSyncRequest, pruneTombstones, runSync } from './sync.ts';
 import { makeKit, startTestServer } from './testkit.ts';
 import type { TestServer } from './testkit.ts';
 import * as hlc from '../shared/hlc.ts';
-import { applyPut, defaultList, defaultTask, emptyRows } from '../shared/merge.ts';
+import { applyPut, defaultList, defaultNote, defaultTask, emptyRows } from '../shared/merge.ts';
 import type { Rows } from '../shared/merge.ts';
-import type { ID, ListFields, ListRow, Op, Put, SortMode, SyncRequest, SyncResponse, TaskFields, TaskRow } from '../shared/types.ts';
+import { NOTE_COLORS } from '../shared/types.ts';
+import type { ID, ListFields, ListRow, NoteFields, NoteRow, Op, Put, SortMode, SyncRequest, SyncResponse, TaskFields, TaskRow } from '../shared/types.ts';
 
 const STEPS = 400;
 const START = Date.UTC(2026, 9, 6, 8);
@@ -53,6 +54,8 @@ interface Device {
   /** Rows that the device deleted, for the undo of the delete. */
   deletedLists: ID[];
   deletedTasks: ID[];
+  /** Notes that the device deleted, with each field from before the delete, for the undo. */
+  deletedNotes: NoteRow[];
 }
 
 interface World {
@@ -66,7 +69,7 @@ interface World {
   known: Map<ID, Set<ID>>;
   serial: number;
   /** Counts that show that the run did real work. */
-  work: { acked: number; rejected: number; fromOther: number; resets: number };
+  work: { acked: number; rejected: number; fromOther: number; notesFromOther: number; resets: number };
   send(device: Device, request: SyncRequest): Promise<SyncResponse>;
   /** The rows of a new device of the person. */
   fresh(userId: ID): Promise<SyncResponse>;
@@ -114,6 +117,9 @@ function act(world: World, device: Device): void {
   const pos = (): string => `a${random.int(1000).toString(36)}`;
   const title = (): string => `${random.pick(TITLES)} ${random.int(100)}`;
   const mine = lists.filter((l) => l.owner === me);
+  const notes = [...device.rows.notes.values()].filter((n) => !n.deleted);
+  const myNotes = notes.filter((n) => n.owner === me);
+  const setNote = (id: ID, fields: NoteFields): void => put(world, device, { kind: 'note', id, fields });
 
   const actions: [number, () => void][] = [
     [
@@ -233,12 +239,89 @@ function act(world: World, device: Device): void {
         setList(random.pick(lists).id, fields);
       },
     ],
+    [
+      3,
+      () => {
+        const id = `n-${world.serial++}`;
+        // A note can have no title.
+        setNote(id, {
+          ...withoutId(defaultNote(id)),
+          title: random.chance(0.3) ? '' : title(),
+          body: `Body ${random.int(100)}`,
+          color: random.pick(NOTE_COLORS),
+          shared: random.chance(0.4),
+          pinned: random.chance(0.2),
+          owner: me,
+          createdAt: now,
+          editedAt: now,
+          editedBy: me,
+        });
+      },
+    ],
+    [
+      4,
+      () => {
+        if (notes.length === 0) return;
+        const note = random.pick(notes);
+        const fields: NoteFields = random.chance(0.5) ? { title: random.chance(0.2) ? '' : title() } : { body: `Body ${random.int(100)}` };
+        // An op of a person who is not the owner can have the stored value of 'shared'.
+        if (random.chance(0.1)) fields.shared = note.shared;
+        setNote(note.id, { ...fields, editedAt: now, editedBy: me });
+      },
+    ],
+    [1, () => notes.length > 0 && setNote(random.pick(notes).id, { color: random.pick(NOTE_COLORS) })],
+    [
+      2,
+      () => {
+        if (notes.length === 0) return;
+        const note = random.pick(notes);
+        if (random.chance(0.5)) setNote(note.id, note.pinned ? { pinned: false } : { pinned: true, archived: false });
+        else setNote(note.id, note.archived ? { archived: false } : { archived: true, pinned: false });
+      },
+    ],
+    [2, () => myNotes.length > 0 && ((note) => setNote(note.id, { shared: !note.shared }))(random.pick(myNotes))],
+    [
+      1,
+      () => {
+        if (myNotes.length === 0) return;
+        const note = random.pick(myNotes);
+        device.deletedNotes.push(note);
+        setNote(note.id, { deleted: true });
+      },
+    ],
+    [
+      1,
+      () => {
+        if (device.deletedNotes.length === 0) return;
+        // The undo sends each field from before the delete, createdAt too.
+        const note = device.deletedNotes.splice(random.int(device.deletedNotes.length), 1)[0]!;
+        setNote(note.id, { ...withoutId(note), deleted: false });
+      },
+    ],
+    [
+      1,
+      () => {
+        // A change that only the owner can make, from a device of the other person. The server
+        // refuses it, and the device must come back to the true note.
+        const others = notes.filter((n) => n.owner !== me);
+        if (others.length === 0) return;
+        setNote(random.pick(others).id, random.pick([{ deleted: true }, { shared: false }, { title: title(), shared: false }]));
+      },
+    ],
   ];
   let roll = random.int(actions.reduce((sum, [weight]) => sum + weight, 0));
   for (const [weight, run] of actions) {
     if (roll < weight) return void run();
     roll -= weight;
   }
+}
+
+/** true if the person can see the note, from the database of the server. */
+function visibleNote(db: Db, userId: ID, noteId: ID): boolean {
+  const note = db.q('SELECT owner, shared, deleted FROM notes WHERE id = ?').get(noteId) as
+    | { owner: ID; shared: number; deleted: number }
+    | undefined;
+  return note !== undefined && note.deleted === 0 && (note.owner === userId || note.shared === 1);
 }
 
 /** true if the person can see the list, from the database of the server. */
@@ -257,6 +340,7 @@ function noteVisible(world: World): void {
     const rows = [
       ...world.db.q(`SELECT l.id FROM lists l WHERE ${VISIBLE}`).all(userId),
       ...world.db.q(`SELECT t.id FROM tasks t JOIN lists l ON l.id = t.list_id WHERE t.deleted = 0 AND ${VISIBLE}`).all(userId),
+      ...world.db.q('SELECT id FROM notes WHERE deleted = 0 AND (owner = ? OR shared = 1)').all(userId),
     ] as { id: ID }[];
     for (const row of rows) known.add(row.id);
   }
@@ -287,8 +371,14 @@ async function sync(world: World, device: Device, options: { lose?: boolean; dur
     expect(task.deleted, `${where}: task ${task.id}`).toBe(false);
     known.add(task.id);
   }
-  const rowIds = new Set([...response.lists, ...response.tasks].map((row) => row.id));
-  for (const id of [...response.gone.lists, ...response.gone.tasks]) {
+  for (const note of response.notes) {
+    expect(note.owner === device.userId || note.shared, `${where}: note ${note.id}`).toBe(true);
+    expect(note.deleted, `${where}: note ${note.id}`).toBe(false);
+    known.add(note.id);
+    if (note.owner !== device.userId) world.work.notesFromOther += 1;
+  }
+  const rowIds = new Set([...response.lists, ...response.tasks, ...response.notes].map((row) => row.id));
+  for (const id of [...response.gone.lists, ...response.gone.tasks, ...response.gone.notes]) {
     expect(known.has(id), `${where}: the gone id ${id} is not an id of this person`).toBe(true);
     expect(rowIds.has(id), `${where}: ${id} is a row and a gone id`).toBe(false);
   }
@@ -303,11 +393,14 @@ async function sync(world: World, device: Device, options: { lose?: boolean; dur
   if (response.reset) {
     device.rows.lists.clear();
     device.rows.tasks.clear();
+    device.rows.notes.clear();
   }
   for (const list of response.lists) device.rows.lists.set(list.id, list);
   for (const task of response.tasks) device.rows.tasks.set(task.id, task);
+  for (const note of response.notes) device.rows.notes.set(note.id, note);
   for (const id of response.gone.lists) device.rows.lists.delete(id);
   for (const id of response.gone.tasks) device.rows.tasks.delete(id);
+  for (const id of response.gone.notes) device.rows.notes.delete(id);
   const done = new Set([...response.acked, ...response.rejected]);
   device.outbox = device.outbox.filter((op) => !done.has(op.opId));
   for (const op of device.outbox) applyPut(device.rows, op);
@@ -347,7 +440,8 @@ async function run(world: World): Promise<void> {
       world.time += 500;
       const sent = device.outbox.length;
       const answer = await sync(world, device);
-      if (sent + answer.lists.length + answer.tasks.length + answer.gone.lists.length + answer.gone.tasks.length > 0) quiet = false;
+      const got = answer.lists.length + answer.tasks.length + answer.notes.length;
+      if (sent + got + answer.gone.lists.length + answer.gone.tasks.length + answer.gone.notes.length > 0) quiet = false;
     }
     if (quiet) break;
   }
@@ -357,16 +451,21 @@ async function run(world: World): Promise<void> {
     const fresh = await world.fresh(device.userId);
     expect(byId(device.rows.lists.values()), `${where}: lists`).toEqual(byId(fresh.lists));
     expect(byId(device.rows.tasks.values()), `${where}: tasks`).toEqual(byId(fresh.tasks));
+    expect(byId(device.rows.notes.values()), `${where}: notes`).toEqual(byId(fresh.notes));
     for (const list of device.rows.lists.values()) {
       expect(list.owner === device.userId || list.shared, `${where}: holds the private list ${list.id}`).toBe(true);
     }
     for (const task of device.rows.tasks.values()) {
       expect(visible(world.db, device.userId, task.listId), `${where}: holds the task ${task.id} of a private list`).toBe(true);
     }
+    for (const note of device.rows.notes.values()) {
+      expect(visibleNote(world.db, device.userId, note.id), `${where}: holds the private note ${note.id}`).toBe(true);
+    }
   }
-  // The run did real work: many ops, and each person got lists of the other person.
+  // The run did real work: many ops, and each person got lists and notes of the other person.
   expect(world.work.acked, `seed ${world.seed}`).toBeGreaterThan(100);
   expect(world.work.fromOther, `seed ${world.seed}`).toBeGreaterThan(0);
+  expect(world.work.notesFromOther, `seed ${world.seed}`).toBeGreaterThan(0);
 }
 
 function makeDevices(input: { random: Random; seed: number; users: { id: ID; name: string }[] }): Device[] {
@@ -388,6 +487,7 @@ function makeDevices(input: { random: Random; seed: number; users: { id: ID; nam
         skew: far ? 120_000 : random.int(40_000) - 20_000,
         deletedLists: [],
         deletedTasks: [],
+        deletedNotes: [],
       };
     }),
   );
@@ -424,7 +524,7 @@ describe('convergence', () => {
         devices: makeDevices({ random, seed, users }),
         known: new Map(users.map((u) => [u.id, new Set<ID>()])),
         serial: 0,
-        work: { acked: 0, rejected: 0, fromOther: 0, resets: 0 },
+        work: { acked: 0, rejected: 0, fromOther: 0, notesFromOther: 0, resets: 0 },
         send: async (device, request) => direct(device.userId, request),
         fresh: async (userId) => direct(userId, { clientId: 'fresh', since: 0, ops: [], tz: 'UTC' }),
         prune: () => pruneTombstones({ db, now: world.time }),
@@ -468,7 +568,7 @@ describe('convergence', () => {
         devices: makeDevices({ random, seed, users: people.map((p) => p.user) }),
         known: new Map(people.map((p) => [p.user.id, new Set<ID>()])),
         serial: 0,
-        work: { acked: 0, rejected: 0, fromOther: 0, resets: 0 },
+        work: { acked: 0, rejected: 0, fromOther: 0, notesFromOther: 0, resets: 0 },
         async send(device, request) {
           const reply = await kit.call<SyncResponse>({ path: '/api/sync', body: request, cookie: cookies.get(device.name) });
           expect(reply.status).toBe(200);
