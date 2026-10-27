@@ -86,24 +86,76 @@ export interface TaskRow {
   starredAt: number | null;
 }
 
+/** The colors of a note, in the order of the color picker. 'default' is the color of a card. */
+export const NOTE_COLORS = [
+  'default',
+  'red',
+  'orange',
+  'yellow',
+  'green',
+  'teal',
+  'blue',
+  'darkblue',
+  'purple',
+  'pink',
+  'brown',
+  'gray',
+] as const;
+export type NoteColor = (typeof NOTE_COLORS)[number];
+
+/** A note: a title, a body, and a color. It is not part of a list. */
+export interface NoteRow {
+  id: ID;
+  /** Can be empty. One line. */
+  title: string;
+  /** Can be empty. Plain text with line breaks. */
+  body: string;
+  color: NoteColor;
+  /** Only the owner changes it. */
+  shared: boolean;
+  /** The time of the last change of the title or the body. */
+  editedAt: number;
+  /** The person who made the last change of the title or the body. */
+  editedBy: ID | null;
+  /** Only the owner changes it. */
+  deleted: boolean;
+  owner: ID;
+  /** A put that makes a note has this field. No other put has it, except the undo of a delete. */
+  createdAt: number;
+  // Per-person fields
+  pinned: boolean;
+  archived: boolean;
+}
+
 export type ListFields = Partial<Omit<ListRow, 'id'>>;
 export type TaskFields = Partial<Omit<TaskRow, 'id'>>;
+export type NoteFields = Partial<Omit<NoteRow, 'id'>>;
 
 export type Put =
   | { kind: 'list'; id: ID; fields: ListFields }
-  | { kind: 'task'; id: ID; fields: TaskFields };
+  | { kind: 'task'; id: ID; fields: TaskFields }
+  | { kind: 'note'; id: ID; fields: NoteFields };
 
 export type Op = Put & { opId: ID; ts: HLC };
 
 export const LIST_USER_FIELDS = ['pos', 'sort', 'hidden'] as const;
 export const TASK_USER_FIELDS = ['starred', 'starredAt'] as const;
+export const NOTE_USER_FIELDS = ['pinned', 'archived'] as const;
 export const LIST_FIXED_FIELDS = ['owner', 'isDefault', 'createdAt'] as const;
 export const TASK_FIXED_FIELDS = ['createdAt', 'createdBy'] as const;
+export const NOTE_FIXED_FIELDS = ['owner', 'createdAt'] as const;
 
 export const LIMITS = {
   title: 1024,
   notes: 8192,
   listTitle: 1024,
+  noteTitle: 1024,
+  // A sync at page close uses keepalive only if its body has at most 20,000 characters
+  // (KEEPALIVE_MAX_CHARS in layer.svelte.ts). This limit leaves room for the title, the JSON
+  // escapes, and the other fields of one note op.
+  noteBody: 16_000,
+  /** The most tasks that one "Make tasks" can make from a note. */
+  noteTasks: 200,
   repeatEvery: 1000,
   name: 40,
   passwordMin: 8,
@@ -124,12 +176,19 @@ export interface SyncResponse {
   reset: boolean;
   lists: ListRow[];
   tasks: TaskRow[];
-  gone: { lists: ID[]; tasks: ID[] };
+  notes: NoteRow[];
+  gone: { lists: ID[]; tasks: ID[]; notes: ID[] };
   acked: ID[];
   rejected: ID[];
   /** Server time in milliseconds. */
   now: number;
 }
+
+/** The answer of /api/sync as the client reads it. A server from before notes leaves out `notes` and `gone.notes`. */
+export type SyncAnswer = Omit<SyncResponse, 'notes' | 'gone'> & {
+  notes?: NoteRow[];
+  gone: { lists: ID[]; tasks: ID[]; notes?: ID[] };
+};
 
 export interface MeResponse {
   me: User | null;
@@ -173,6 +232,13 @@ export interface ListView {
   groups: ViewGroup[];
   completed: TaskRow[];
   openCount: number;
+}
+
+/** The notes of one section of the notes screen, made by buildNotesView. */
+export interface NotesView {
+  /** Empty in the archive. */
+  pinned: NoteRow[];
+  others: NoteRow[];
 }
 
 // Action types, made by shared/actions.ts
