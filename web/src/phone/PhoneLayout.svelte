@@ -3,31 +3,37 @@
   import { cancelDialogs } from '../common/dialogs.svelte.ts';
   import { syncBadge } from '../common/sync-badge.svelte.ts';
   import { createListFlow } from '../common/task-ops.ts';
-  import { getList, getTask, listsOrdered, prefs, session } from '../data/index.ts';
+  import { getList, getNote, getTask, listsOrdered, prefs, session, toast } from '../data/index.ts';
+  import { newId } from '../../../shared/ids.ts';
   import type { ID } from '../../../shared/types.ts';
   import { app, openSettings, takeLaunch } from '../shell/app.svelte.ts';
   import { Icon, Menu, reducedMotion } from '../ui/index.ts';
   import AddSheet from './AddSheet.svelte';
-  import { closeMenu, menu, openAdd, phone, runMenu, scrollMemory, STARRED } from './phone.svelte.ts';
+  import NoteScreen from './NoteScreen.svelte';
+  import NotesPage from './NotesPage.svelte';
+  import { closeMenu, closeNote, loadNotes, menu, newNote, NOTES, notes, openAdd, phone, runMenu, scrollMemory, STARRED } from './phone.svelte.ts';
   import TabBar from './TabBar.svelte';
   import TaskDetail from './TaskDetail.svelte';
   import TaskPage from './TaskPage.svelte';
 
   /** A page counts as at rest when no scroll event came for this time. */
   const SETTLE_MS = 120;
-  /** A task from a notification can be on its way from the server. The screen waits this long for it. */
+  /** A task from a notification, or a note from the address, can be on its way from the server. The screen waits this long for it. */
   const TASK_WAIT_MS = 15_000;
 
   const lists = $derived(listsOrdered());
-  const tabIds = $derived([STARRED, ...lists.map((list) => list.id)]);
+  const tabIds = $derived([STARRED, NOTES, ...lists.map((list) => list.id)]);
 
   // The state is in a module, and the layout can start again after a change of the window width.
   phone.detailId = null;
   phone.addOpen = false;
+  phone.note = null;
+  phone.archive = false;
+  phone.query = '';
   scrollMemory.clear();
   phone.tab = untrack(() => {
     const saved = prefs.lastTab;
-    if (saved !== null && (saved === STARRED || getList(saved))) return saved;
+    if (saved !== null && (saved === STARRED || saved === NOTES || getList(saved))) return saved;
     return listsOrdered()[0]?.id ?? STARRED;
   });
 
@@ -158,6 +164,32 @@
     untrack(() => place({ index: activeIndex, smooth: false }));
   });
 
+  // ---- Notes ----
+
+  const onNotes = $derived(phone.tab === NOTES);
+  /** The Notes page has content now, or the person is on it. Then the notes parts must come. */
+  const notesNeeded = $derived(hasContent(NOTES, tabIds.indexOf(NOTES)));
+  let notesFailed = false;
+
+  // It runs again when the person comes to the Notes tab, so a failed download gets a new try.
+  $effect(() => {
+    if (!notesNeeded) return;
+    void onNotes;
+    void loadNotes().then((loaded) => {
+      if (loaded || notesFailed || untrack(() => phone.tab) !== NOTES) return;
+      // A browser keeps a failed download of a script for the life of the page. A reload loses
+      // nothing: the data is on the device.
+      notesFailed = true;
+      toast.show({ message: 'Notes could not load. Check the connection', action: { label: 'Reload', run: () => location.reload() } });
+    });
+  });
+
+  /** The add button: a new note on the Notes tab, the add sheet on each other tab. */
+  function add(): void {
+    if (onNotes) newNote();
+    else openAdd();
+  }
+
   async function newList(): Promise<void> {
     const id = await createListFlow();
     if (id === null) return;
@@ -169,17 +201,41 @@
   // ---- What the address of the page asked for, and a click on a notification ----
 
   let wanted = $state<ID | null>(null);
+  let wantedNote = $state<ID | null>(null);
+  let wantedNew = $state(false);
 
   $effect(() => {
-    const { taskId, listId, newTask } = app.launch;
-    if (taskId === null && listId === null && !newTask) return;
+    const { taskId, listId, newTask, noteId, newNote: asksNewNote } = app.launch;
+    if (taskId === null && listId === null && !newTask && noteId === null && !asksNewNote) return;
     untrack(() => {
       const launch = takeLaunch();
       if (launch.listId !== null) goTo(launch.listId, { smooth: false });
       if (launch.taskId !== null) wanted = launch.taskId;
-      else if (launch.newTask) openAdd();
+      else if (launch.noteId !== null) {
+        goTo(NOTES, { smooth: false });
+        wantedNote = launch.noteId;
+      } else if (launch.newNote) {
+        goTo(NOTES, { smooth: false });
+        phone.archive = false;
+        wantedNew = true;
+      } else if (launch.newTask) {
+        // The add sheet needs a list. The Notes tab has none.
+        if (phone.tab === NOTES && lists[0]) goTo(lists[0].id, { smooth: false });
+        // Not openAdd: its flushSync breaks the scheduler of Svelte inside an effect. A launch
+        // is not a tap, so no keyboard comes, and the overlay stack focuses the field.
+        phone.addOpen = true;
+      }
     });
   });
+
+  /** Closes what is open on top of the pages, before the address opens a task or a note. */
+  function clearTop(): void {
+    closeMenu();
+    cancelDialogs();
+    phone.addOpen = false;
+    phone.detailId = null;
+    closeNote();
+  }
 
   $effect(() => {
     const id = wanted;
@@ -192,11 +248,40 @@
     untrack(() => {
       wanted = null;
       // The task must not open below a menu or a picker of a different task.
-      closeMenu();
-      cancelDialogs();
-      phone.addOpen = false;
+      clearTop();
       goTo(task.listId, { smooth: false });
       phone.detailId = id;
+    });
+  });
+
+  // SPEC section 9: a note that is not on the device yet can be on its way from the server.
+  $effect(() => {
+    const id = wantedNote;
+    if (id === null) return;
+    const note = getNote(id);
+    if (!note || !notes.parts) {
+      const timer = setTimeout(() => (wantedNote = null), TASK_WAIT_MS);
+      return () => clearTimeout(timer);
+    }
+    untrack(() => {
+      wantedNote = null;
+      clearTop();
+      goTo(NOTES, { smooth: false });
+      // The card of the note is in the view behind the editor.
+      phone.archive = note.archived;
+      phone.query = '';
+      phone.note = { id, isNew: false };
+    });
+  });
+
+  // A launch is not a tap, so no keyboard comes. The overlay stack puts the focus in the body.
+  $effect(() => {
+    if (!wantedNew || !notes.parts) return;
+    untrack(() => {
+      wantedNew = false;
+      clearTop();
+      phone.archive = false;
+      phone.note = { id: newId(), isNew: true };
     });
   });
 
@@ -213,7 +298,7 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="phone" data-print-flow ontouchstart={() => {}}>
   <header class="top" data-print-hide>
-    <h1>Tasks</h1>
+    <h1>{onNotes ? 'Notes' : 'Tasks'}</h1>
     {#if badge}
       <button class={['sync ui-state', badge]} type="button" aria-label={BADGES[badge].text} data-testid="sync-badge" onclick={openSettings}>
         <Icon name={BADGES[badge].icon} size={20} />
@@ -230,15 +315,31 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="pager" bind:this={pager} onscroll={onScroll} ontouchstart={() => (jumping = false)} data-print-flow>
     {#each tabIds as id, index (id)}
-      <div class="page" role="tabpanel" aria-label={id === STARRED ? 'Starred' : getList(id)?.title} data-print-flow>
-        {#if hasContent(id, index)}
-          <TaskPage tab={id} active={id === phone.tab} />
-        {/if}
-      </div>
+      {#if id === NOTES}
+        <div class="page notes" role="tabpanel" aria-label="Notes" data-print-hide>
+          {#if hasContent(id, index)}
+            <NotesPage />
+          {/if}
+        </div>
+      {:else}
+        <div class="page" role="tabpanel" aria-label={id === STARRED ? 'Starred' : getList(id)?.title} data-print-flow>
+          {#if hasContent(id, index)}
+            <TaskPage tab={id} active={id === phone.tab} />
+          {/if}
+        </div>
+      {/if}
     {/each}
   </div>
 
-  <button class="fab ui-state" type="button" aria-label="Add a task" data-print-hide onclick={openAdd}>
+  <!-- On the Notes tab it waits for the notes parts, which have the editor. -->
+  <button
+    class="fab ui-state"
+    type="button"
+    aria-label={onNotes ? 'New note' : 'Add a task'}
+    disabled={onNotes && !notes.parts}
+    data-print-hide
+    onclick={add}
+  >
     <Icon name="plus" size={28} />
   </button>
 </div>
@@ -252,8 +353,21 @@
   {/key}
 {/if}
 
+{#if phone.note !== null}
+  {@const open = phone.note}
+  {#key open.id}
+    <NoteScreen id={open.id} isNew={open.isNew} />
+  {/key}
+{/if}
+
 <!-- One menu for the layout. It is always there, so a menu that opens while the last one goes away shows. -->
-<Menu bind:open={menu.open} items={menu.request?.items ?? []} title={menu.request?.title} label={menu.request?.title ?? 'Options'} onselect={runMenu} />
+<Menu
+  bind:open={menu.open}
+  items={menu.request?.items ?? []}
+  title={menu.request?.title}
+  label={menu.request?.label ?? menu.request?.title ?? 'Options'}
+  onselect={runMenu}
+/>
 
 <style>
   .phone {
@@ -352,6 +466,10 @@
     /* A change in one page costs nothing in the pages next to it. */
     contain: layout paint style;
   }
+  /* The search row of the Notes page has the room at the top, so it covers the cards that scroll below it. */
+  .page.notes {
+    padding-top: 0;
+  }
 
   .fab {
     position: absolute;
@@ -366,10 +484,15 @@
     background: var(--primary);
     box-shadow: var(--shadow-2);
     color: var(--on-primary);
-    transition: transform var(--dur-fast) var(--ease);
+    transition:
+      transform var(--dur-fast) var(--ease),
+      opacity var(--dur-fast) linear;
   }
-  .fab:active {
+  .fab:active:not(:disabled) {
     transform: scale(0.94);
+  }
+  .fab:disabled {
+    opacity: 0.6;
   }
 
   /* The base has 40 px icon buttons. On a phone, the press area is 44 px. */

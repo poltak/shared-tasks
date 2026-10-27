@@ -3,7 +3,7 @@
   import { actions, listView } from '../data/index.ts';
   import { dnd, dndContainer, dndItem } from '../dnd/index.ts';
   import { Icon, reducedMotion } from '../ui/index.ts';
-  import { STARRED } from './phone.svelte.ts';
+  import { NOTES, STARRED } from './phone.svelte.ts';
 
   interface Props {
     lists: readonly ListRow[];
@@ -62,9 +62,12 @@
     draw();
   }
 
+  /** The tabs in the order of the bar and of the pages. The boxes have the same order. */
+  const tabIds = $derived([STARRED, NOTES, ...lists.map((list) => list.id)]);
+
   /** Brings the active tab to the middle of the bar. */
   function reveal(smooth: boolean): void {
-    const box = boxes[active === STARRED ? 0 : lists.findIndex((list) => list.id === active) + 1];
+    const box = boxes[tabIds.indexOf(active)];
     if (!bar || !box) return;
     bar.scrollTo({ left: box.left - (barWidth - box.width) / 2, behavior: smooth && !reducedMotion() ? 'smooth' : 'auto' });
   }
@@ -89,7 +92,8 @@
     return () => observer.disconnect();
   });
 
-  // SPEC section 8: touch and hold a tab, then move it. The star tab and "New list" stay in place.
+  // SPEC section 8: touch and hold a tab, then move it. The star tab, the Notes tab, and "New list"
+  // stay in place: they are not items of the drag engine.
   const drag = dnd({
     axis: 'x',
     group: 'tabs',
@@ -105,6 +109,11 @@
   <div class="row" bind:this={row} role="tablist" aria-label="Lists" {...dndContainer({ id: 'tabs', group: 'tabs' })} {@attach drag}>
     <button class="tab ui-state" type="button" role="tab" aria-selected={active === STARRED} aria-label="Starred" onclick={() => onpick(STARRED)}>
       <Icon name="star-filled" size={20} />
+    </button>
+    <!-- No .label: the text needs no ellipsis, and that class marks the names of the lists. -->
+    <button class="tab notes ui-state" type="button" role="tab" aria-selected={active === NOTES} onclick={() => onpick(NOTES)}>
+      <Icon name="bulb" size={20} />
+      <span>Notes</span>
     </button>
     {#each lists as list (list.id)}
       {@const count = listView(list.id).openCount}
@@ -182,6 +191,10 @@
     font-variant-numeric: tabular-nums;
     line-height: 20px;
     text-align: center;
+  }
+  .notes {
+    gap: 6px;
+    padding-left: 12px;
   }
   .new {
     gap: 4px;
